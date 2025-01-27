@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http/httptest"
 	"os"
@@ -29,13 +30,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maticnetwork/bor/event"
-	"github.com/maticnetwork/bor/log"
-	"github.com/maticnetwork/bor/node"
-	"github.com/maticnetwork/bor/p2p"
-	"github.com/maticnetwork/bor/p2p/enode"
-	"github.com/maticnetwork/bor/p2p/simulations/adapters"
-	"github.com/maticnetwork/bor/rpc"
+	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/simulations/adapters"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/mattn/go-colorable"
 )
 
@@ -43,8 +44,7 @@ func TestMain(m *testing.M) {
 	loglevel := flag.Int("loglevel", 2, "verbosity of logs")
 
 	flag.Parse()
-	log.PrintOrigins(true)
-	log.Root().SetHandler(log.LvlFilterHandler(log.Lvl(*loglevel), log.StreamHandler(colorable.NewColorableStderr(), log.TerminalFormat(true))))
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(colorable.NewColorableStderr(), slog.Level(*loglevel), true)))
 	os.Exit(m.Run())
 }
 
@@ -64,12 +64,16 @@ type testService struct {
 	state atomic.Value
 }
 
-func newTestService(ctx *adapters.ServiceContext) (node.Service, error) {
+func newTestService(ctx *adapters.ServiceContext, stack *node.Node) (node.Lifecycle, error) {
 	svc := &testService{
 		id:    ctx.Config.ID,
 		peers: make(map[enode.ID]*testPeer),
 	}
 	svc.state.Store(ctx.Snapshot)
+
+	stack.RegisterProtocols(svc.Protocols())
+	stack.RegisterAPIs(svc.APIs())
+
 	return svc, nil
 }
 
@@ -81,14 +85,17 @@ type testPeer struct {
 func (t *testService) peer(id enode.ID) *testPeer {
 	t.peersMtx.Lock()
 	defer t.peersMtx.Unlock()
+
 	if peer, ok := t.peers[id]; ok {
 		return peer
 	}
+
 	peer := &testPeer{
 		testReady: make(chan struct{}),
 		dumReady:  make(chan struct{}),
 	}
 	t.peers[id] = peer
+
 	return peer
 }
 
@@ -126,7 +133,7 @@ func (t *testService) APIs() []rpc.API {
 	}}
 }
 
-func (t *testService) Start(server *p2p.Server) error {
+func (t *testService) Start() error {
 	return nil
 }
 
@@ -138,13 +145,15 @@ func (t *testService) Stop() error {
 // message with the given code
 func (t *testService) handshake(rw p2p.MsgReadWriter, code uint64) error {
 	errc := make(chan error, 2)
-	go func() { errc <- p2p.Send(rw, code, struct{}{}) }()
+	go func() { errc <- p2p.SendItems(rw, code) }()
 	go func() { errc <- p2p.ExpectMsg(rw, code, struct{}{}) }()
+
 	for i := 0; i < 2; i++ {
 		if err := <-errc; err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -156,9 +165,11 @@ func (t *testService) RunTest(p *p2p.Peer, rw p2p.MsgReadWriter) error {
 	if err := t.handshake(rw, 2); err != nil {
 		return err
 	}
+
 	if err := t.handshake(rw, 1); err != nil {
 		return err
 	}
+
 	if err := t.handshake(rw, 0); err != nil {
 		return err
 	}
@@ -268,6 +279,7 @@ func (t *TestAPI) Events(ctx context.Context) (*rpc.Subscription, error) {
 
 	go func() {
 		events := make(chan int64)
+
 		sub := t.feed.Subscribe(events)
 		defer sub.Unsubscribe()
 
@@ -279,8 +291,6 @@ func (t *TestAPI) Events(ctx context.Context) (*rpc.Subscription, error) {
 				return
 			case <-rpcSub.Err():
 				return
-			case <-notifier.Closed():
-				return
 			}
 		}
 	}()
@@ -288,16 +298,18 @@ func (t *TestAPI) Events(ctx context.Context) (*rpc.Subscription, error) {
 	return rpcSub, nil
 }
 
-var testServices = adapters.Services{
+var testServices = adapters.LifecycleConstructors{
 	"test": newTestService,
 }
 
 func testHTTPServer(t *testing.T) (*Network, *httptest.Server) {
 	t.Helper()
+
 	adapter := adapters.NewSimAdapter(testServices)
 	network := NewNetwork(adapter, &NetworkConfig{
 		DefaultService: "test",
 	})
+
 	return network, httptest.NewServer(NewServer(network))
 }
 
@@ -311,11 +323,14 @@ func TestHTTPNetwork(t *testing.T) {
 	// subscribe to events so we can check them later
 	client := NewClient(s.URL)
 	events := make(chan *Event, 100)
+
 	var opts SubscribeOpts
+
 	sub, err := client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// check we can retrieve details about the network
@@ -323,6 +338,7 @@ func TestHTTPNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error getting network: %s", err)
 	}
+
 	if gotNetwork.ID != network.ID {
 		t.Fatalf("expected network to have ID %q, got %q", network.ID, gotNetwork.ID)
 	}
@@ -344,10 +360,12 @@ func TestHTTPNetwork(t *testing.T) {
 	// reconnect the stream and check we get the current nodes and conns
 	events = make(chan *Event, 100)
 	opts.Current = true
+
 	sub, err = client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 	x = &expectEvents{t, events, sub}
 	x.expect(
@@ -361,12 +379,15 @@ func startTestNetwork(t *testing.T, client *Client) []string {
 	// create two nodes
 	nodeCount := 2
 	nodeIDs := make([]string, nodeCount)
+
 	for i := 0; i < nodeCount; i++ {
 		config := adapters.RandomNodeConfig()
+
 		node, err := client.CreateNode(config)
 		if err != nil {
 			t.Fatalf("error creating node: %s", err)
 		}
+
 		nodeIDs[i] = node.ID
 	}
 
@@ -375,17 +396,21 @@ func startTestNetwork(t *testing.T, client *Client) []string {
 	if err != nil {
 		t.Fatalf("error getting nodes: %s", err)
 	}
+
 	if len(nodes) != nodeCount {
 		t.Fatalf("expected %d nodes, got %d", nodeCount, len(nodes))
 	}
+
 	for i, nodeID := range nodeIDs {
 		if nodes[i].ID != nodeID {
 			t.Fatalf("expected node %d to have ID %q, got %q", i, nodeID, nodes[i].ID)
 		}
+
 		node, err := client.GetNode(nodeID)
 		if err != nil {
 			t.Fatalf("error getting node %d: %s", i, err)
 		}
+
 		if node.ID != nodeID {
 			t.Fatalf("expected node %d to have ID %q, got %q", i, nodeID, node.ID)
 		}
@@ -404,6 +429,7 @@ func startTestNetwork(t *testing.T, client *Client) []string {
 		if i == nodeCount-1 {
 			peerId = 0
 		}
+
 		if err := client.ConnectNode(nodeIDs[i], nodeIDs[peerId]); err != nil {
 			t.Fatalf("error connecting nodes: %s", err)
 		}
@@ -473,8 +499,10 @@ loop:
 
 func (t *expectEvents) expect(events ...*Event) {
 	t.Helper()
+
 	timeout := time.After(10 * time.Second)
 	i := 0
+
 	for {
 		select {
 		case event := <-t.events:
@@ -486,14 +514,15 @@ func (t *expectEvents) expect(events ...*Event) {
 			}
 
 			switch expected.Type {
-
 			case EventTypeNode:
 				if event.Node == nil {
 					t.Fatal("expected event.Node to be set")
 				}
+
 				if event.Node.ID() != expected.Node.ID() {
 					t.Fatalf("expected node event %d to have id %q, got %q", i, expected.Node.ID().TerminalString(), event.Node.ID().TerminalString())
 				}
+
 				if event.Node.Up() != expected.Node.Up() {
 					t.Fatalf("expected node event %d to have up=%t, got up=%t", i, expected.Node.Up(), event.Node.Up())
 				}
@@ -502,16 +531,18 @@ func (t *expectEvents) expect(events ...*Event) {
 				if event.Conn == nil {
 					t.Fatal("expected event.Conn to be set")
 				}
+
 				if event.Conn.One != expected.Conn.One {
 					t.Fatalf("expected conn event %d to have one=%q, got one=%q", i, expected.Conn.One.TerminalString(), event.Conn.One.TerminalString())
 				}
+
 				if event.Conn.Other != expected.Conn.Other {
 					t.Fatalf("expected conn event %d to have other=%q, got other=%q", i, expected.Conn.Other.TerminalString(), event.Conn.Other.TerminalString())
 				}
+
 				if event.Conn.Up != expected.Conn.Up {
 					t.Fatalf("expected conn event %d to have up=%t, got up=%t", i, expected.Conn.Up, event.Conn.Up)
 				}
-
 			}
 
 			i++
@@ -538,10 +569,12 @@ func TestHTTPNodeRPC(t *testing.T) {
 	client := NewClient(s.URL)
 
 	config := adapters.RandomNodeConfig()
+
 	node, err := client.CreateNode(config)
 	if err != nil {
 		t.Fatalf("error creating node: %s", err)
 	}
+
 	if err := client.StartNode(node.ID); err != nil {
 		t.Fatalf("error starting node: %s", err)
 	}
@@ -549,10 +582,12 @@ func TestHTTPNodeRPC(t *testing.T) {
 	// create two RPC clients
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	rpcClient1, err := client.RPCClient(ctx, node.ID)
 	if err != nil {
 		t.Fatalf("error getting node RPC client: %s", err)
 	}
+
 	rpcClient2, err := client.RPCClient(ctx, node.ID)
 	if err != nil {
 		t.Fatalf("error getting node RPC client: %s", err)
@@ -560,20 +595,24 @@ func TestHTTPNodeRPC(t *testing.T) {
 
 	// subscribe to events using client 1
 	events := make(chan int64, 1)
+
 	sub, err := rpcClient1.Subscribe(ctx, "test", events, "events")
 	if err != nil {
 		t.Fatalf("error subscribing to events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// call some RPC methods using client 2
 	if err := rpcClient2.CallContext(ctx, nil, "test_add", 10); err != nil {
 		t.Fatalf("error calling RPC method: %s", err)
 	}
+
 	var result int64
 	if err := rpcClient2.CallContext(ctx, &result, "test_get"); err != nil {
 		t.Fatalf("error calling RPC method: %s", err)
 	}
+
 	if result != 10 {
 		t.Fatalf("expected result to be 10, got %d", result)
 	}
@@ -595,12 +634,15 @@ func TestHTTPSnapshot(t *testing.T) {
 	network, s := testHTTPServer(t)
 	defer s.Close()
 
-	var eventsDone = make(chan struct{})
+	var eventsDone = make(chan struct{}, 1)
+
 	count := 1
 	eventsDoneChan := make(chan *Event)
 	eventSub := network.Events().Subscribe(eventsDoneChan)
+
 	go func() {
 		defer eventSub.Unsubscribe()
+
 		for event := range eventsDoneChan {
 			if event.Type == EventTypeConn && !event.Control {
 				count--
@@ -616,41 +658,52 @@ func TestHTTPSnapshot(t *testing.T) {
 	client := NewClient(s.URL)
 	nodeCount := 2
 	nodes := make([]*p2p.NodeInfo, nodeCount)
+
 	for i := 0; i < nodeCount; i++ {
 		config := adapters.RandomNodeConfig()
+
 		node, err := client.CreateNode(config)
 		if err != nil {
 			t.Fatalf("error creating node: %s", err)
 		}
+
 		if err := client.StartNode(node.ID); err != nil {
 			t.Fatalf("error starting node: %s", err)
 		}
+
 		nodes[i] = node
 	}
+
 	if err := client.ConnectNode(nodes[0].ID, nodes[1].ID); err != nil {
 		t.Fatalf("error connecting nodes: %s", err)
 	}
 
 	// store some state in the test services
 	states := make([]string, nodeCount)
+
 	for i, node := range nodes {
 		rpc, err := client.RPCClient(context.Background(), node.ID)
 		if err != nil {
 			t.Fatalf("error getting RPC client: %s", err)
 		}
+
 		defer rpc.Close()
+
 		state := fmt.Sprintf("%x", rand.Int())
 		if err := rpc.Call(nil, "test_setState", []byte(state)); err != nil {
 			t.Fatalf("error setting service state: %s", err)
 		}
+
 		states[i] = state
 	}
+
 	<-eventsDone
 	// create a snapshot
 	snap, err := client.CreateSnapshot()
 	if err != nil {
 		t.Fatalf("error creating snapshot: %s", err)
 	}
+
 	for i, state := range states {
 		gotState := snap.Nodes[i].Snapshots["test"]
 		if string(gotState) != state {
@@ -664,8 +717,10 @@ func TestHTTPSnapshot(t *testing.T) {
 	client = NewClient(s.URL)
 	count = 1
 	eventSub = network2.Events().Subscribe(eventsDoneChan)
+
 	go func() {
 		defer eventSub.Unsubscribe()
+
 		for event := range eventsDoneChan {
 			if event.Type == EventTypeConn && !event.Control {
 				count--
@@ -679,17 +734,21 @@ func TestHTTPSnapshot(t *testing.T) {
 
 	// subscribe to events so we can check them later
 	events := make(chan *Event, 100)
+
 	var opts SubscribeOpts
+
 	sub, err := client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// load the snapshot
 	if err := client.LoadSnapshot(snap); err != nil {
 		t.Fatalf("error loading snapshot: %s", err)
 	}
+
 	<-eventsDone
 
 	// check the nodes and connection exists
@@ -697,25 +756,31 @@ func TestHTTPSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error getting network: %s", err)
 	}
+
 	if len(net.Nodes) != nodeCount {
 		t.Fatalf("expected network to have %d nodes, got %d", nodeCount, len(net.Nodes))
 	}
+
 	for i, node := range nodes {
 		id := net.Nodes[i].ID().String()
 		if id != node.ID {
 			t.Fatalf("expected node %d to have ID %s, got %s", i, node.ID, id)
 		}
 	}
+
 	if len(net.Conns) != 1 {
 		t.Fatalf("expected network to have 1 connection, got %d", len(net.Conns))
 	}
+
 	conn := net.Conns[0]
 	if conn.One.String() != nodes[0].ID {
 		t.Fatalf("expected connection to have one=%q, got one=%q", nodes[0].ID, conn.One)
 	}
+
 	if conn.Other.String() != nodes[1].ID {
 		t.Fatalf("expected connection to have other=%q, got other=%q", nodes[1].ID, conn.Other)
 	}
+
 	if !conn.Up {
 		t.Fatal("should be up")
 	}
@@ -726,11 +791,14 @@ func TestHTTPSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("error getting RPC client: %s", err)
 		}
+
 		defer rpc.Close()
+
 		var state []byte
 		if err := rpc.Call(&state, "test_getState"); err != nil {
 			t.Fatalf("error getting service state: %s", err)
 		}
+
 		if string(state) != states[i] {
 			t.Fatalf("expected snapshot state %q, got %q", states[i], state)
 		}
@@ -761,10 +829,12 @@ func TestMsgFilterPassMultiple(t *testing.T) {
 	opts := SubscribeOpts{
 		Filter: "prb:0-test:0",
 	}
+
 	sub, err := client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// start a simulation network
@@ -791,10 +861,12 @@ func TestMsgFilterPassWildcard(t *testing.T) {
 	opts := SubscribeOpts{
 		Filter: "prb:0,2-test:*",
 	}
+
 	sub, err := client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// start a simulation network
@@ -823,10 +895,12 @@ func TestMsgFilterPassSingle(t *testing.T) {
 	opts := SubscribeOpts{
 		Filter: "dum:0",
 	}
+
 	sub, err := client.SubscribeNetwork(events, opts)
 	if err != nil {
 		t.Fatalf("error subscribing to network events: %s", err)
 	}
+
 	defer sub.Unsubscribe()
 
 	// start a simulation network
@@ -839,7 +913,7 @@ func TestMsgFilterPassSingle(t *testing.T) {
 	})
 }
 
-// TestMsgFilterPassSingle tests streaming message events using an invalid
+// TestMsgFilterFailBadParams tests streaming message events using an invalid
 // filter
 func TestMsgFilterFailBadParams(t *testing.T) {
 	// start the server
@@ -851,18 +925,21 @@ func TestMsgFilterFailBadParams(t *testing.T) {
 	opts := SubscribeOpts{
 		Filter: "foo:",
 	}
+
 	_, err := client.SubscribeNetwork(events, opts)
 	if err == nil {
 		t.Fatalf("expected event subscription to fail but succeeded!")
 	}
 
 	opts.Filter = "bzz:aa"
+
 	_, err = client.SubscribeNetwork(events, opts)
 	if err == nil {
 		t.Fatalf("expected event subscription to fail but succeeded!")
 	}
 
 	opts.Filter = "invalid"
+
 	_, err = client.SubscribeNetwork(events, opts)
 	if err == nil {
 		t.Fatalf("expected event subscription to fail but succeeded!")

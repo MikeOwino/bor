@@ -19,8 +19,8 @@ package runtime_test
 import (
 	"fmt"
 
-	"github.com/maticnetwork/bor/common"
-	"github.com/maticnetwork/bor/core/vm/runtime"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/vm/runtime"
 )
 
 func ExampleExecute() {
@@ -28,6 +28,7 @@ func ExampleExecute() {
 	if err != nil {
 		fmt.Println(err)
 	}
+
 	fmt.Println(ret)
 	// Output:
 	// [96 96 96 64 82 96 8 86 91 0]

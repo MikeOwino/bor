@@ -18,10 +18,10 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -36,12 +36,15 @@ func TestWebsocketClientHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wsGetConfig failed: %s", err)
 	}
+
 	if endpoint != "wss://example.com:1234" {
 		t.Fatal("User should have been stripped from the URL")
 	}
+
 	if header.Get("authorization") != "Basic dGVzdHVzZXI6dGVzdC1QQVNTXzAx" {
 		t.Fatal("Basic auth header is incorrect")
 	}
+
 	if header.Get("origin") != "https://example.com" {
 		t.Fatal("Origin not set")
 	}
@@ -56,6 +59,7 @@ func TestWebsocketOriginCheck(t *testing.T) {
 		httpsrv = httptest.NewServer(srv.WebsocketHandler([]string{"http://example.com"}))
 		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
 	)
+
 	defer srv.Stop()
 	defer httpsrv.Close()
 
@@ -64,16 +68,18 @@ func TestWebsocketOriginCheck(t *testing.T) {
 		client.Close()
 		t.Fatal("no error for wrong origin")
 	}
+
 	wantErr := wsHandshakeError{websocket.ErrBadHandshake, "403 Forbidden"}
-	if !reflect.DeepEqual(err, wantErr) {
+	if !errors.Is(err, wantErr) {
 		t.Fatalf("wrong error for wrong origin: %q", err)
 	}
 
 	// Connections without origin header should work.
 	client, err = DialWebsocket(context.Background(), wsURL, "")
 	if err != nil {
-		t.Fatal("error for empty origin")
+		t.Fatalf("error for empty origin: %v", err)
 	}
+
 	client.Close()
 }
 
@@ -86,6 +92,7 @@ func TestWebsocketLargeCall(t *testing.T) {
 		httpsrv = httptest.NewServer(srv.WebsocketHandler([]string{"*"}))
 		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
 	)
+
 	defer srv.Stop()
 	defer httpsrv.Close()
 
@@ -97,19 +104,122 @@ func TestWebsocketLargeCall(t *testing.T) {
 
 	// This call sends slightly less than the limit and should work.
 	var result echoResult
-	arg := strings.Repeat("x", maxRequestContentLength-200)
+	arg := strings.Repeat("x", defaultBodyLimit-200)
 	if err := client.Call(&result, "test_echo", arg, 1); err != nil {
 		t.Fatalf("valid call didn't work: %v", err)
 	}
+
 	if result.String != arg {
 		t.Fatal("wrong string echoed")
 	}
 
 	// This call sends twice the allowed size and shouldn't work.
-	arg = strings.Repeat("x", maxRequestContentLength*2)
+	arg = strings.Repeat("x", defaultBodyLimit*2)
+
 	err = client.Call(&result, "test_echo", arg)
 	if err == nil {
 		t.Fatal("no error for too large call")
+	}
+}
+
+// This test checks whether the wsMessageSizeLimit option is obeyed.
+func TestWebsocketLargeRead(t *testing.T) {
+	t.Parallel()
+
+	var (
+		srv     = newTestServer()
+		httpsrv = httptest.NewServer(srv.WebsocketHandler([]string{"*"}))
+		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
+	)
+	defer srv.Stop()
+	defer httpsrv.Close()
+
+	testLimit := func(limit *int64) {
+		opts := []ClientOption{}
+		expLimit := int64(wsDefaultReadLimit)
+		if limit != nil && *limit >= 0 {
+			opts = append(opts, WithWebsocketMessageSizeLimit(*limit))
+			if *limit > 0 {
+				expLimit = *limit // 0 means infinite
+			}
+		}
+		client, err := DialOptions(context.Background(), wsURL, opts...)
+		if err != nil {
+			t.Fatalf("can't dial: %v", err)
+		}
+		defer client.Close()
+		// Remove some bytes for json encoding overhead.
+		underLimit := int(expLimit - 128)
+		overLimit := expLimit + 1
+		if expLimit == wsDefaultReadLimit {
+			// No point trying the full 32MB in tests. Just sanity-check that
+			// it's not obviously limited.
+			underLimit = 1024
+			overLimit = -1
+		}
+		var res string
+		// Check under limit
+		if err = client.Call(&res, "test_repeat", "A", underLimit); err != nil {
+			t.Fatalf("unexpected error with limit %d: %v", expLimit, err)
+		}
+		if len(res) != underLimit || strings.Count(res, "A") != underLimit {
+			t.Fatal("incorrect data")
+		}
+		// Check over limit
+		if overLimit > 0 {
+			err = client.Call(&res, "test_repeat", "A", expLimit+1)
+			if err == nil || err != websocket.ErrReadLimit {
+				t.Fatalf("wrong error with limit %d: %v expecting %v", expLimit, err, websocket.ErrReadLimit)
+			}
+		}
+	}
+	ptr := func(v int64) *int64 { return &v }
+
+	testLimit(ptr(-1)) // Should be ignored (use default)
+	testLimit(ptr(0))  // Should be ignored (use default)
+	testLimit(nil)     // Should be ignored (use default)
+	testLimit(ptr(200))
+	testLimit(ptr(wsDefaultReadLimit * 2))
+}
+
+func TestWebsocketPeerInfo(t *testing.T) {
+	var (
+		s     = newTestServer()
+		ts    = httptest.NewServer(s.WebsocketHandler([]string{"origin.example.com"}))
+		tsurl = "ws:" + strings.TrimPrefix(ts.URL, "http:")
+	)
+
+	defer s.Stop()
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	c, err := DialWebsocket(ctx, tsurl, "origin.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// Request peer information.
+	var connInfo PeerInfo
+	if err := c.Call(&connInfo, "test_peerInfo"); err != nil {
+		t.Fatal(err)
+	}
+
+	if connInfo.RemoteAddr == "" {
+		t.Error("RemoteAddr not set")
+	}
+
+	if connInfo.Transport != "ws" {
+		t.Errorf("wrong Transport %q", connInfo.Transport)
+	}
+
+	if connInfo.HTTP.UserAgent != "Go-http-client/1.1" {
+		t.Errorf("wrong HTTP.UserAgent %q", connInfo.HTTP.UserAgent)
+	}
+
+	if connInfo.HTTP.Origin != "origin.example.com" {
+		t.Errorf("wrong HTTP.Origin %q", connInfo.HTTP.UserAgent)
 	}
 }
 
@@ -120,8 +230,9 @@ func TestClientWebsocketPing(t *testing.T) {
 	var (
 		sendPing    = make(chan struct{})
 		server      = wsPingTestServer(t, sendPing)
-		ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 	)
+
 	defer cancel()
 	defer server.Shutdown(ctx)
 
@@ -129,11 +240,16 @@ func TestClientWebsocketPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client dial error: %v", err)
 	}
+	defer client.Close()
+
 	resultChan := make(chan int)
+
 	sub, err := client.EthSubscribe(ctx, resultChan, "foo")
 	if err != nil {
 		t.Fatalf("client subscribe error: %v", err)
 	}
+	// Note: Unsubscribe is not called on this subscription because the mockup
+	// server can't handle the request.
 
 	// Wait for the context's deadline to be reached before proceeding.
 	// This is important for reproducing https://github.com/ethereum/go-ethereum/issues/19798
@@ -143,6 +259,7 @@ func TestClientWebsocketPing(t *testing.T) {
 	// Wait for the subscription result.
 	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
+
 	for {
 		select {
 		case err := <-sub.Err():
@@ -157,25 +274,60 @@ func TestClientWebsocketPing(t *testing.T) {
 	}
 }
 
+// This checks that the websocket transport can deal with large messages.
+func TestClientWebsocketLargeMessage(t *testing.T) {
+	var (
+		srv     = NewServer("", 0, 0)
+		httpsrv = httptest.NewServer(srv.WebsocketHandler(nil))
+		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
+	)
+
+	defer srv.Stop()
+	defer httpsrv.Close()
+
+	respLength := wsDefaultReadLimit - 50
+	srv.RegisterName("test", largeRespService{respLength})
+
+	c, err := DialWebsocket(context.Background(), wsURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var r string
+	if err := c.Call(&r, "test_largeResp"); err != nil {
+		t.Fatal("call failed:", err)
+	}
+
+	if len(r) != respLength {
+		t.Fatalf("response has wrong length %d, want %d", len(r), respLength)
+	}
+}
+
 // wsPingTestServer runs a WebSocket server which accepts a single subscription request.
 // When a value arrives on sendPing, the server sends a ping frame, waits for a matching
 // pong and finally delivers a single subscription result.
 func wsPingTestServer(t *testing.T, sendPing <-chan struct{}) *http.Server {
 	var srv http.Server
+
 	shutdown := make(chan struct{})
+
 	srv.RegisterOnShutdown(func() {
 		close(shutdown)
 	})
+
 	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Upgrade to WebSocket.
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("server WS upgrade error: %v", err)
 			return
 		}
+
 		defer conn.Close()
 
 		// Handle the connection.
@@ -187,8 +339,10 @@ func wsPingTestServer(t *testing.T, sendPing <-chan struct{}) *http.Server {
 	if err != nil {
 		t.Fatal("can't listen:", err)
 	}
+
 	srv.Addr = listener.Addr().String()
 	go srv.Serve(listener)
+
 	return &srv
 }
 
@@ -204,6 +358,7 @@ func wsPingTestHandler(t *testing.T, conn *websocket.Conn, shutdown, sendPing <-
 		t.Errorf("server read error: %v", err)
 		return
 	}
+
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(subResp)); err != nil {
 		t.Errorf("server write error: %v", err)
 		return
@@ -211,17 +366,21 @@ func wsPingTestHandler(t *testing.T, conn *websocket.Conn, shutdown, sendPing <-
 
 	// Read from the connection to process control messages.
 	var pongCh = make(chan string)
+
 	conn.SetPongHandler(func(d string) error {
 		t.Logf("server got pong: %q", d)
 		pongCh <- d
+
 		return nil
 	})
+
 	go func() {
 		for {
 			typ, msg, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
+
 			t.Logf("server got message (%d): %q", typ, msg)
 		}
 	}()
@@ -231,16 +390,20 @@ func wsPingTestHandler(t *testing.T, conn *websocket.Conn, shutdown, sendPing <-
 		wantPong string
 		timer    = time.NewTimer(0)
 	)
+
 	defer timer.Stop()
 	<-timer.C
+
 	for {
 		select {
 		case _, open := <-sendPing:
 			if !open {
 				sendPing = nil
 			}
+
 			t.Logf("server sending ping")
 			conn.WriteMessage(websocket.PingMessage, []byte("ping"))
+
 			wantPong = "ping"
 		case data := <-pongCh:
 			if wantPong == "" {
@@ -248,7 +411,9 @@ func wsPingTestHandler(t *testing.T, conn *websocket.Conn, shutdown, sendPing <-
 			} else if data != wantPong {
 				t.Errorf("got pong with wrong data %q", data)
 			}
+
 			wantPong = ""
+
 			timer.Reset(200 * time.Millisecond)
 		case <-timer.C:
 			t.Logf("server sending response")

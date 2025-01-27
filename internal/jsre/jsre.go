@@ -20,14 +20,15 @@ package jsre
 import (
 	crand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/maticnetwork/bor/common"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // JSRE is a JS runtime environment embedding the goja interpreter.
@@ -79,6 +80,7 @@ func New(assetPath string, output io.Writer) *JSRE {
 	go re.runEventLoop()
 	re.Set("loadScript", MakeCallback(re.vm, re.loadScript))
 	re.Set("inspect", re.prettyPrintJS)
+
 	return re
 }
 
@@ -86,11 +88,13 @@ func New(assetPath string, output io.Writer) *JSRE {
 func randomSource() *rand.Rand {
 	bytes := make([]byte, 8)
 	seed := time.Now().UnixNano()
+
 	if _, err := crand.Read(bytes); err == nil {
 		seed = int64(binary.LittleEndian.Uint64(bytes))
 	}
 
 	src := rand.NewSource(seed)
+
 	return rand.New(src)
 }
 
@@ -117,6 +121,7 @@ func (re *JSRE) runEventLoop() {
 		if 0 >= delay {
 			delay = 1
 		}
+
 		timer := &jsTimer{
 			duration: time.Duration(delay) * time.Millisecond,
 			call:     call,
@@ -147,8 +152,10 @@ func (re *JSRE) runEventLoop() {
 			timer.timer.Stop()
 			delete(registry, timer)
 		}
+
 		return goja.Undefined()
 	}
+
 	re.vm.Set("_setTimeout", setTimeout)
 	re.vm.Set("_setInterval", setInterval)
 	re.vm.RunString(`var setTimeout = function(args) {
@@ -220,29 +227,44 @@ loop:
 }
 
 // Do executes the given function on the JS event loop.
+// When the runtime is stopped, fn will not execute.
 func (re *JSRE) Do(fn func(*goja.Runtime)) {
 	done := make(chan bool)
 	req := &evalReq{fn, done}
-	re.evalQueue <- req
-	<-done
+	select {
+	case re.evalQueue <- req:
+		<-done
+	case <-re.closed:
+	}
 }
 
-// stops the event loop before exit, optionally waits for all timers to expire
+// Stop terminates the event loop, optionally waiting for all timers to expire.
 func (re *JSRE) Stop(waitForCallbacks bool) {
-	select {
-	case <-re.closed:
-	case re.stopEventLoop <- waitForCallbacks:
-		<-re.closed
+	timeout := time.NewTimer(10 * time.Millisecond)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-re.closed:
+			return
+		case re.stopEventLoop <- waitForCallbacks:
+			<-re.closed
+			return
+		case <-timeout.C:
+			// JS is blocked, interrupt and try again.
+			re.vm.Interrupt(errors.New("JS runtime stopped"))
+		}
 	}
 }
 
 // Exec(file) loads and runs the contents of a file
 // if a relative path is given, the jsre's assetPath is used
 func (re *JSRE) Exec(file string) error {
-	code, err := ioutil.ReadFile(common.AbsolutePath(re.assetPath, file))
+	code, err := os.ReadFile(common.AbsolutePath(re.assetPath, file))
 	if err != nil {
 		return err
 	}
+
 	return re.Compile(file, string(code))
 }
 
@@ -265,6 +287,7 @@ func MakeCallback(vm *goja.Runtime, fn func(Call) (goja.Value, error)) goja.Valu
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
+
 		return result
 	})
 }
@@ -278,8 +301,22 @@ func (re *JSRE) Evaluate(code string, w io.Writer) {
 		} else {
 			prettyPrint(vm, val, w)
 		}
+
 		fmt.Fprintln(w)
 	})
+}
+
+// Interrupt stops the current JS evaluation.
+func (re *JSRE) Interrupt(v interface{}) {
+	done := make(chan bool)
+	noop := func(*goja.Runtime) {}
+
+	select {
+	case re.evalQueue <- &evalReq{noop, done}:
+		// event loop is not blocked.
+	default:
+		re.vm.Interrupt(v)
+	}
 }
 
 // Compile compiles and then runs a piece of JS code.
@@ -292,14 +329,17 @@ func (re *JSRE) Compile(filename string, src string) (err error) {
 func (re *JSRE) loadScript(call Call) (goja.Value, error) {
 	file := call.Argument(0).ToString().String()
 	file = common.AbsolutePath(re.assetPath, file)
-	source, err := ioutil.ReadFile(file)
+	source, err := os.ReadFile(file)
+
 	if err != nil {
-		return nil, fmt.Errorf("Could not read file %s: %v", file, err)
+		return nil, fmt.Errorf("could not read file %s: %v", file, err)
 	}
+
 	value, err := compileAndRun(re.vm, file, string(source))
 	if err != nil {
-		return nil, fmt.Errorf("Error while compiling or running script: %v", err)
+		return nil, fmt.Errorf("error while compiling or running script: %v", err)
 	}
+
 	return value, nil
 }
 
@@ -308,5 +348,6 @@ func compileAndRun(vm *goja.Runtime, filename string, src string) (goja.Value, e
 	if err != nil {
 		return goja.Null(), err
 	}
+
 	return vm.RunProgram(script)
 }

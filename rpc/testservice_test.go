@@ -20,19 +20,23 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
 
 func newTestServer() *Server {
-	server := NewServer()
+	server := NewServer("", 0, 0)
 	server.idgen = sequentialIDGenerator()
+
 	if err := server.RegisterName("test", new(testService)); err != nil {
 		panic(err)
 	}
+
 	if err := server.RegisterName("nftest", new(notificationTestService)); err != nil {
 		panic(err)
 	}
+
 	return server
 }
 
@@ -41,12 +45,15 @@ func sequentialIDGenerator() func() ID {
 		mu      sync.Mutex
 		counter uint64
 	)
+
 	return func() ID {
 		mu.Lock()
 		defer mu.Unlock()
+
 		counter++
 		id := make([]byte, 8)
 		binary.BigEndian.PutUint64(id, counter)
+
 		return encodeID(id)
 	}
 }
@@ -69,7 +76,17 @@ func (testError) Error() string          { return "testError" }
 func (testError) ErrorCode() int         { return 444 }
 func (testError) ErrorData() interface{} { return "testError data" }
 
+type MarshalErrObj struct{}
+
+func (o *MarshalErrObj) MarshalText() ([]byte, error) {
+	return nil, errors.New("marshal error")
+}
+
 func (s *testService) NoArgsRets() {}
+
+func (s *testService) Null() any {
+	return nil
+}
 
 func (s *testService) Echo(str string, i int, args *echoArgs) echoResult {
 	return echoResult{str, i, args}
@@ -77,6 +94,14 @@ func (s *testService) Echo(str string, i int, args *echoArgs) echoResult {
 
 func (s *testService) EchoWithCtx(ctx context.Context, str string, i int, args *echoArgs) echoResult {
 	return echoResult{str, i, args}
+}
+
+func (s *testService) Repeat(msg string, i int) string {
+	return strings.Repeat(msg, i)
+}
+
+func (s *testService) PeerInfo(ctx context.Context) PeerInfo {
+	return PeerInfoFromContext(ctx)
 }
 
 func (s *testService) Sleep(ctx context.Context, duration time.Duration) {
@@ -109,13 +134,23 @@ func (s *testService) ReturnError() error {
 	return testError{}
 }
 
+func (s *testService) MarshalError() *MarshalErrObj {
+	return &MarshalErrObj{}
+}
+
+func (s *testService) Panic() string {
+	panic("service panic")
+}
+
 func (s *testService) CallMeBack(ctx context.Context, method string, args []interface{}) (interface{}, error) {
 	c, ok := ClientFromContext(ctx)
 	if !ok {
 		return nil, errors.New("no client")
 	}
+
 	var result interface{}
 	err := c.Call(&result, method, args...)
+
 	return result, err
 }
 
@@ -124,11 +159,15 @@ func (s *testService) CallMeBackLater(ctx context.Context, method string, args [
 	if !ok {
 		return errors.New("no client")
 	}
+
 	go func() {
 		<-ctx.Done()
+
 		var result interface{}
+
 		c.Call(&result, method, args...)
 	}()
+
 	return nil
 }
 
@@ -162,20 +201,19 @@ func (s *notificationTestService) SomeSubscription(ctx context.Context, n, val i
 	// back to the client before the first subscription.Notify is called. Otherwise the
 	// events might be send before the response for the *_subscribe method.
 	subscription := notifier.CreateSubscription()
+
 	go func() {
 		for i := 0; i < n; i++ {
 			if err := notifier.Notify(subscription.ID, val+i); err != nil {
 				return
 			}
 		}
-		select {
-		case <-notifier.Closed():
-		case <-subscription.Err():
-		}
+		<-subscription.Err()
 		if s.unsubscribed != nil {
 			s.unsubscribed <- string(subscription.ID)
 		}
 	}()
+
 	return subscription, nil
 }
 
@@ -187,10 +225,21 @@ func (s *notificationTestService) HangSubscription(ctx context.Context, val int)
 	}
 	s.gotHangSubscriptionReq <- struct{}{}
 	<-s.unblockHangSubscription
+
 	subscription := notifier.CreateSubscription()
 
 	go func() {
 		notifier.Notify(subscription.ID, val)
 	}()
+
 	return subscription, nil
+}
+
+// largeRespService generates arbitrary-size JSON responses.
+type largeRespService struct {
+	length int
+}
+
+func (x largeRespService) LargeResp() string {
+	return strings.Repeat("x", x.length)
 }

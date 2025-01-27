@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/maticnetwork/bor/common/hexutil"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 type MyType [5]byte
@@ -35,6 +35,7 @@ func (v MyType) String() string {
 
 func ExampleUnmarshalFixedText() {
 	var v1, v2 MyType
+
 	fmt.Println("v1 error:", json.Unmarshal([]byte(`"0x01"`), &v1))
 	fmt.Println("v2 error:", json.Unmarshal([]byte(`"0x0101010101"`), &v2))
 	fmt.Println("v2:", v2)

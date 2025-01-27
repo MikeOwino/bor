@@ -20,11 +20,13 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Archive interface {
@@ -58,18 +60,23 @@ func AddFile(a Archive, file string) error {
 	if err != nil {
 		return err
 	}
+
 	defer fd.Close()
+
 	fi, err := fd.Stat()
 	if err != nil {
 		return err
 	}
+
 	w, err := a.Header(fi)
 	if err != nil {
 		return err
 	}
+
 	if _, err := io.Copy(w, fd); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -87,20 +94,26 @@ func WriteArchive(name string, files []string) (err error) {
 			os.Remove(name)
 		}
 	}()
+
 	archive, basename := NewArchive(archfd)
 	if archive == nil {
-		return fmt.Errorf("unknown archive extension")
+		return errors.New("unknown archive extension")
 	}
+
 	fmt.Println(name)
+
 	if err := archive.Directory(basename); err != nil {
 		return err
 	}
+
 	for _, file := range files {
 		fmt.Println("   +", filepath.Base(file))
+
 		if err := AddFile(archive, file); err != nil {
 			return err
 		}
 	}
+
 	return archive.Close()
 }
 
@@ -124,12 +137,15 @@ func (a *ZipArchive) Header(fi os.FileInfo) (io.Writer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("can't make zip header: %v", err)
 	}
+
 	head.Name = a.dir + head.Name
 	head.Method = zip.Deflate
+
 	w, err := a.zipw.CreateHeader(head)
 	if err != nil {
 		return nil, fmt.Errorf("can't add zip header: %v", err)
 	}
+
 	return w, nil
 }
 
@@ -137,6 +153,7 @@ func (a *ZipArchive) Close() error {
 	if err := a.zipw.Close(); err != nil {
 		return err
 	}
+
 	return a.file.Close()
 }
 
@@ -150,15 +167,18 @@ type TarballArchive struct {
 func NewTarballArchive(w io.WriteCloser) Archive {
 	gzw := gzip.NewWriter(w)
 	tarw := tar.NewWriter(gzw)
+
 	return &TarballArchive{"", tarw, gzw, w}
 }
 
 func (a *TarballArchive) Directory(name string) error {
 	a.dir = name + "/"
+
 	return a.tarw.WriteHeader(&tar.Header{
 		Name:     a.dir,
 		Mode:     0755,
 		Typeflag: tar.TypeDir,
+		ModTime:  time.Now(),
 	})
 }
 
@@ -167,10 +187,12 @@ func (a *TarballArchive) Header(fi os.FileInfo) (io.Writer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("can't make tar header: %v", err)
 	}
+
 	head.Name = a.dir + head.Name
 	if err := a.tarw.WriteHeader(head); err != nil {
 		return nil, fmt.Errorf("can't add tar header: %v", err)
 	}
+
 	return a.tarw, nil
 }
 
@@ -178,53 +200,127 @@ func (a *TarballArchive) Close() error {
 	if err := a.tarw.Close(); err != nil {
 		return err
 	}
+
 	if err := a.gzw.Close(); err != nil {
 		return err
 	}
+
 	return a.file.Close()
 }
 
-func ExtractTarballArchive(archive string, dest string) error {
-	// We're only interested in gzipped archives, wrap the reader now
+// ExtractArchive unpacks a .zip or .tar.gz archive to the destination directory.
+func ExtractArchive(archive string, dest string) error {
 	ar, err := os.Open(archive)
 	if err != nil {
 		return err
 	}
 	defer ar.Close()
 
+	switch {
+	case strings.HasSuffix(archive, ".tar.gz"):
+		return extractTarball(ar, dest)
+	case strings.HasSuffix(archive, ".zip"):
+		return extractZip(ar, dest)
+	default:
+		return fmt.Errorf("unhandled archive type %s", archive)
+	}
+}
+
+// extractTarball unpacks a .tar.gz file.
+func extractTarball(ar io.Reader, dest string) error {
 	gzr, err := gzip.NewReader(ar)
 	if err != nil {
 		return err
 	}
 	defer gzr.Close()
 
-	// Iterate over all the files in the tarball
 	tr := tar.NewReader(gzr)
+
 	for {
-		// Fetch the next tarball header and abort if needed
+		// Move to the next file header.
 		header, err := tr.Next()
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
+
 			return err
 		}
-		// Figure out the target and create it
-		target := filepath.Join(dest, header.Name)
+		// We only care about regular files, directory modes
+		// and special file types are not supported.
+		if header.Typeflag == tar.TypeReg {
+			armode := header.FileInfo().Mode()
 
-		switch header.Typeflag {
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
-			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			err := extractFile(header.Name, armode, tr, dest)
 			if err != nil {
-				return err
+				return fmt.Errorf("extract %s: %v", header.Name, err)
 			}
-			if _, err := io.Copy(file, tr); err != nil {
-				return err
-			}
-			file.Close()
 		}
 	}
+}
+
+// extractZip unpacks the given .zip file.
+func extractZip(ar *os.File, dest string) error {
+	info, err := ar.Stat()
+	if err != nil {
+		return err
+	}
+
+	zr, err := zip.NewReader(ar, info.Size())
+	if err != nil {
+		return err
+	}
+
+	for _, zf := range zr.File {
+		if !zf.Mode().IsRegular() {
+			continue
+		}
+
+		data, err := zf.Open()
+		if err != nil {
+			return err
+		}
+
+		err = extractFile(zf.Name, zf.Mode(), data, dest)
+		data.Close()
+
+		if err != nil {
+			return fmt.Errorf("extract %s: %v", zf.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// extractFile extracts a single file from an archive.
+func extractFile(arpath string, armode os.FileMode, data io.Reader, dest string) error {
+	// Check that path is inside destination directory.
+	target := filepath.Join(dest, filepath.FromSlash(arpath))
+	if !strings.HasPrefix(target, filepath.Clean(dest)+string(os.PathSeparator)) {
+		return fmt.Errorf("path %q escapes archive destination", target)
+	}
+
+	// Remove the preivously-extracted file if it exists
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+
+	// Recreate the destination directory
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+
+	// Copy file data.
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, armode)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(file, data); err != nil {
+		file.Close()
+		os.Remove(target)
+
+		return err
+	}
+
+	return file.Close()
 }

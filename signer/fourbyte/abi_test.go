@@ -22,8 +22,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/maticnetwork/bor/accounts/abi"
-	"github.com/maticnetwork/bor/common"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func verify(t *testing.T, jsondata, calldata string, exp []interface{}) {
@@ -31,19 +31,24 @@ func verify(t *testing.T, jsondata, calldata string, exp []interface{}) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	cd := common.Hex2Bytes(calldata)
 	sigdata, argdata := cd[:4], cd[4:]
+
 	method, err := abispec.MethodById(sigdata)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	data, err := method.Inputs.UnpackValues(argdata)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(data) != len(exp) {
 		t.Fatalf("Mismatched length, expected %d, got %d", len(exp), len(data))
 	}
+
 	for i, elem := range data {
 		if !reflect.DeepEqual(elem, exp[i]) {
 			t.Fatalf("Unpack error, arg %d, got %v, want %v", i, elem, exp[i])
@@ -52,11 +57,13 @@ func verify(t *testing.T, jsondata, calldata string, exp []interface{}) {
 }
 
 func TestNewUnpacker(t *testing.T) {
+	t.Parallel()
 	type unpackTest struct {
 		jsondata string
 		calldata string
 		exp      []interface{}
 	}
+
 	testcases := []unpackTest{
 		{ // https://solidity.readthedocs.io/en/develop/abi-spec.html#use-of-dynamic-types
 			`[{"type":"function","name":"f", "inputs":[{"type":"uint256"},{"type":"uint32[]"},{"type":"bytes10"},{"type":"bytes"}]}]`,
@@ -68,7 +75,7 @@ func TestNewUnpacker(t *testing.T) {
 				[10]byte{49, 50, 51, 52, 53, 54, 55, 56, 57, 48},
 				common.Hex2Bytes("48656c6c6f2c20776f726c6421"),
 			},
-		}, { // https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI#examples
+		}, { // https://docs.soliditylang.org/en/develop/abi-spec.html#examples
 			`[{"type":"function","name":"sam","inputs":[{"type":"bytes"},{"type":"bool"},{"type":"uint256[]"}]}]`,
 			//  "dave", true and [1,2,3]
 			"a5643bf20000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000464617665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003",
@@ -97,6 +104,7 @@ func TestNewUnpacker(t *testing.T) {
 }
 
 func TestCalldataDecoding(t *testing.T) {
+	t.Parallel()
 	// send(uint256)                              : a52c101e
 	// compareAndApprove(address,uint256,uint256) : 751e1079
 	// issue(address[],uint256)                   : 42958b54
@@ -124,7 +132,7 @@ func TestCalldataDecoding(t *testing.T) {
 		"42958b5400000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000042",
 		// Too short compareAndApprove
 		"a52c101e00ff0000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000042",
-		// From https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI
+		// From https://docs.soliditylang.org/en/develop/abi-spec.html
 		// contains a bool with illegal values
 		"a5643bf20000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000001100000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000464617665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003",
 	} {
@@ -135,7 +143,7 @@ func TestCalldataDecoding(t *testing.T) {
 	}
 	// Expected success
 	for i, hexdata := range []string{
-		// From https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI
+		// From https://docs.soliditylang.org/en/develop/abi-spec.html
 		"a5643bf20000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000464617665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003",
 		"a52c101e0000000000000000000000000000000000000000000000000000000000000012",
 		"a52c101eFFffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -159,12 +167,14 @@ func TestCalldataDecoding(t *testing.T) {
 }
 
 func TestMaliciousABIStrings(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"func(uint256,uint256,[]uint256)",
 		"func(uint256,uint256,uint256,)",
 		"func(,uint256,uint256,uint256)",
 	}
 	data := common.Hex2Bytes("4401a6e40000000000000000000000000000000000000000000000000000000000000012")
+
 	for i, tt := range tests {
 		_, err := verifySelector(tt, data)
 		if err == nil {

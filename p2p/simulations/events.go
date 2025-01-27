@@ -30,7 +30,7 @@ const (
 	EventTypeNode EventType = "node"
 
 	// EventTypeConn is the type of event emitted when a connection is
-	// is either established or dropped between two nodes
+	// either established or dropped between two nodes
 	EventTypeConn EventType = "conn"
 
 	// EventTypeMsg is the type of event emitted when a p2p message it
@@ -85,6 +85,7 @@ func NewEvent(v interface{}) *Event {
 	default:
 		panic(fmt.Sprintf("invalid event type: %T", v))
 	}
+
 	return event
 }
 
@@ -92,6 +93,7 @@ func NewEvent(v interface{}) *Event {
 func ControlEvent(v interface{}) *Event {
 	event := NewEvent(v)
 	event.Control = true
+
 	return event
 }
 

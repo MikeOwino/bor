@@ -19,15 +19,16 @@ package simulations
 import (
 	"testing"
 
-	"github.com/maticnetwork/bor/node"
-	"github.com/maticnetwork/bor/p2p/enode"
-	"github.com/maticnetwork/bor/p2p/simulations/adapters"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/simulations/adapters"
 )
 
 func newTestNetwork(t *testing.T, nodeCount int) (*Network, []enode.ID) {
 	t.Helper()
-	adapter := adapters.NewSimAdapter(adapters.Services{
-		"noopwoop": func(ctx *adapters.ServiceContext) (node.Service, error) {
+
+	adapter := adapters.NewSimAdapter(adapters.LifecycleConstructors{
+		"noopwoop": func(ctx *adapters.ServiceContext, stack *node.Node) (node.Lifecycle, error) {
 			return NewNoopService(nil), nil
 		},
 	})
@@ -41,13 +42,16 @@ func newTestNetwork(t *testing.T, nodeCount int) (*Network, []enode.ID) {
 	ids := make([]enode.ID, nodeCount)
 	for i := range ids {
 		conf := adapters.RandomNodeConfig()
+
 		node, err := network.NewNodeWithConfig(conf)
 		if err != nil {
 			t.Fatalf("error creating node: %s", err)
 		}
+
 		if err := network.Start(node.ID()); err != nil {
 			t.Fatalf("error starting node: %s", err)
 		}
+
 		ids[i] = node.ID()
 	}
 
@@ -93,6 +97,7 @@ func TestConnectToRandomNode(t *testing.T) {
 	}
 
 	var cc int
+
 	for i, a := range ids {
 		for _, b := range ids[i:] {
 			if net.GetConn(a, b) != nil {
