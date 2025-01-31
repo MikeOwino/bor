@@ -19,22 +19,21 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
 
-	"github.com/maticnetwork/bor/log"
-	"github.com/maticnetwork/bor/node"
-	"github.com/maticnetwork/bor/p2p"
-	"github.com/maticnetwork/bor/p2p/enode"
-	"github.com/maticnetwork/bor/p2p/simulations"
-	"github.com/maticnetwork/bor/p2p/simulations/adapters"
-	"github.com/maticnetwork/bor/rpc"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/simulations"
+	"github.com/ethereum/go-ethereum/p2p/simulations/adapters"
 )
 
-var adapterType = flag.String("adapter", "sim", `node adapter to use (one of "sim", "exec" or "docker")`)
+var adapterType = flag.String("adapter", "sim", `node adapter to use (one of "sim" or "exec")`)
 
 // main() starts a simulation network which contains nodes running a simple
 // ping-pong protocol
@@ -42,30 +41,33 @@ func main() {
 	flag.Parse()
 
 	// set the log level to Trace
-	log.Root().SetHandler(log.LvlFilterHandler(log.LvlTrace, log.StreamHandler(os.Stderr, log.TerminalFormat(false))))
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelTrace, false)))
 
 	// register a single ping-pong service
-	services := map[string]adapters.ServiceFunc{
-		"ping-pong": func(ctx *adapters.ServiceContext) (node.Service, error) {
-			return newPingPongService(ctx.Config.ID), nil
+	services := map[string]adapters.LifecycleConstructor{
+		"ping-pong": func(ctx *adapters.ServiceContext, stack *node.Node) (node.Lifecycle, error) {
+			pps := newPingPongService(ctx.Config.ID)
+			stack.RegisterProtocols(pps.Protocols())
+			return pps, nil
 		},
 	}
-	adapters.RegisterServices(services)
+	adapters.RegisterLifecycles(services)
 
 	// create the NodeAdapter
 	var adapter adapters.NodeAdapter
 
 	switch *adapterType {
-
 	case "sim":
 		log.Info("using sim adapter")
+
 		adapter = adapters.NewSimAdapter(services)
 
 	case "exec":
-		tmpdir, err := ioutil.TempDir("", "p2p-example")
+		tmpdir, err := os.MkdirTemp("", "p2p-example")
 		if err != nil {
 			log.Crit("error creating temp dir", "err", err)
 		}
+
 		defer os.RemoveAll(tmpdir)
 		log.Info("using exec adapter", "tmpdir", tmpdir)
 		adapter = adapters.NewExecAdapter(tmpdir)
@@ -76,6 +78,7 @@ func main() {
 
 	// start the HTTP API
 	log.Info("starting simulation server on 0.0.0.0:8888...")
+
 	network := simulations.NewNetwork(adapter, &simulations.NetworkConfig{
 		DefaultService: "ping-pong",
 	})
@@ -90,7 +93,7 @@ func main() {
 type pingPongService struct {
 	id       enode.ID
 	log      log.Logger
-	received int64
+	received atomic.Int64
 }
 
 func newPingPongService(id enode.ID) *pingPongService {
@@ -110,11 +113,7 @@ func (p *pingPongService) Protocols() []p2p.Protocol {
 	}}
 }
 
-func (p *pingPongService) APIs() []rpc.API {
-	return nil
-}
-
-func (p *pingPongService) Start(server *p2p.Server) error {
+func (p *pingPongService) Start() error {
 	p.log.Info("ping-pong service starting")
 	return nil
 }
@@ -128,7 +127,7 @@ func (p *pingPongService) Info() interface{} {
 	return struct {
 		Received int64 `json:"received"`
 	}{
-		atomic.LoadInt64(&p.received),
+		p.received.Load(),
 	}
 }
 
@@ -142,10 +141,12 @@ const (
 func (p *pingPongService) Run(peer *p2p.Peer, rw p2p.MsgReadWriter) error {
 	log := p.log.New("peer.id", peer.ID())
 
-	errC := make(chan error)
+	errC := make(chan error, 1)
+
 	go func() {
 		for range time.Tick(10 * time.Second) {
 			log.Info("sending ping")
+
 			if err := p2p.Send(rw, pingMsgCode, "PING"); err != nil {
 				errC <- err
 				return
@@ -159,18 +160,22 @@ func (p *pingPongService) Run(peer *p2p.Peer, rw p2p.MsgReadWriter) error {
 				errC <- err
 				return
 			}
-			payload, err := ioutil.ReadAll(msg.Payload)
+
+			payload, err := io.ReadAll(msg.Payload)
 			if err != nil {
 				errC <- err
 				return
 			}
+
 			log.Info("received message", "msg.code", msg.Code, "msg.payload", string(payload))
-			atomic.AddInt64(&p.received, 1)
+			p.received.Add(1)
 			if msg.Code == pingMsgCode {
 				log.Info("sending pong")
+
 				go p2p.Send(rw, pongMsgCode, "PONG")
 			}
 		}
 	}()
+
 	return <-errC
 }

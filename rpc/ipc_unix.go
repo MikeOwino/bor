@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+//go:build darwin || dragonfly || freebsd || linux || nacl || netbsd || openbsd || solaris
 // +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris
 
 package rpc
@@ -24,14 +25,23 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 
-	"github.com/maticnetwork/bor/log"
+	"github.com/ethereum/go-ethereum/log"
+)
+
+const (
+	// The limit of unix domain socket path diverse between OS, on Darwin it's 104 bytes
+	// but on Linux it's 108 byte, so we should depend on syscall.RawSockaddrUnix's
+	// definition dynamically
+	maxPathSize = len(syscall.RawSockaddrUnix{}.Path)
 )
 
 // ipcListen will create a Unix socket on the given endpoint.
 func ipcListen(endpoint string) (net.Listener, error) {
-	if len(endpoint) > int(max_path_size) {
-		log.Warn(fmt.Sprintf("The ipc endpoint is longer than %d characters. ", max_path_size),
+	// account for null-terminator too
+	if len(endpoint)+1 > maxPathSize {
+		log.Warn(fmt.Sprintf("The ipc endpoint is longer than %d characters. ", maxPathSize-1),
 			"endpoint", endpoint)
 	}
 
@@ -39,12 +49,16 @@ func ipcListen(endpoint string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(endpoint), 0751); err != nil {
 		return nil, err
 	}
+
 	os.Remove(endpoint)
+
 	l, err := net.Listen("unix", endpoint)
 	if err != nil {
 		return nil, err
 	}
+
 	os.Chmod(endpoint, 0600)
+
 	return l, nil
 }
 

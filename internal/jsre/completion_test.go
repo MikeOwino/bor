@@ -72,6 +72,7 @@ func TestCompleteKeywords(t *testing.T) {
 		{
 			input: "x.gazonk.",
 			want: []string{
+				"x.gazonk.__proto__",
 				"x.gazonk.constructor",
 				"x.gazonk.hasOwnProperty",
 				"x.gazonk.isPrototypeOf",
@@ -83,6 +84,7 @@ func TestCompleteKeywords(t *testing.T) {
 			},
 		},
 	}
+
 	for _, test := range tests {
 		cs := re.CompleteKeywords(test.input)
 		if !reflect.DeepEqual(cs, test.want) {
