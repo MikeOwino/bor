@@ -18,14 +18,17 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
+	"time"
 
-	mapset "github.com/deckarep/golang-set"
-	"github.com/maticnetwork/bor/log"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 const MetadataApi = "rpc"
+const EngineApi = "engine"
 
 // CodecOption specifies which type of messages a codec supports.
 //
@@ -44,22 +47,82 @@ const (
 type Server struct {
 	services serviceRegistry
 	idgen    func() ID
-	run      int32
-	codecs   mapset.Set
+
+	mutex  sync.Mutex
+	codecs map[ServerCodec]struct{}
+	run    atomic.Bool
+
+	BatchLimit    uint64
+	executionPool *SafePool
+
+	batchItemLimit     int
+	batchResponseLimit int
+	httpBodyLimit      int
 }
 
 // NewServer creates a new server instance with no registered handlers.
-func NewServer() *Server {
-	server := &Server{idgen: randomIDGenerator(), codecs: mapset.NewSet(), run: 1}
+func NewServer(service string, executionPoolSize uint64, executionPoolRequesttimeout time.Duration) *Server {
+	reportEpStats := true
+	if service == "" || service == "test" {
+		reportEpStats = false
+	}
+
+	server := &Server{
+		idgen:         randomIDGenerator(),
+		codecs:        make(map[ServerCodec]struct{}),
+		executionPool: NewExecutionPool(int(executionPoolSize), executionPoolRequesttimeout, service, reportEpStats),
+		httpBodyLimit: defaultBodyLimit,
+	}
+	server.run.Store(true)
+
 	// Register the default service providing meta information about the RPC service such
 	// as the services and methods it offers.
 	rpcService := &RPCService{server}
 	server.RegisterName(MetadataApi, rpcService)
+
 	return server
 }
 
+func (s *Server) SetRPCBatchLimit(batchLimit uint64) {
+	s.BatchLimit = batchLimit
+}
+
+func (s *Server) SetExecutionPoolSize(n int) {
+	s.executionPool.ChangeSize(n)
+}
+
+func (s *Server) SetExecutionPoolRequestTimeout(n time.Duration) {
+	s.executionPool.ChangeTimeout(n)
+}
+
+func (s *Server) GetExecutionPoolRequestTimeout() time.Duration {
+	return s.executionPool.Timeout()
+}
+
+func (s *Server) GetExecutionPoolSize() int {
+	return s.executionPool.Size()
+}
+
+// SetBatchLimits sets limits applied to batch requests. There are two limits: 'itemLimit'
+// is the maximum number of items in a batch. 'maxResponseSize' is the maximum number of
+// response bytes across all requests in a batch.
+//
+// This method should be called before processing any requests via ServeCodec, ServeHTTP,
+// ServeListener etc.
+func (s *Server) SetBatchLimits(itemLimit, maxResponseSize int) {
+	s.batchItemLimit = itemLimit
+	s.batchResponseLimit = maxResponseSize
+}
+
+// SetHTTPBodyLimit sets the size limit for HTTP requests.
+//
+// This method should be called before processing any requests via ServeHTTP.
+func (s *Server) SetHTTPBodyLimit(limit int) {
+	s.httpBodyLimit = limit
+}
+
 // RegisterName creates a service for the given receiver type under the given name. When no
-// methods on the given receiver match the criteria to be either a RPC method or a
+// methods on the given receiver match the criteria to be either an RPC method or a
 // subscription an error is returned. Otherwise a new service is created and added to the
 // service collection this server provides to clients.
 func (s *Server) RegisterName(name string, receiver interface{}) error {
@@ -74,18 +137,39 @@ func (s *Server) RegisterName(name string, receiver interface{}) error {
 func (s *Server) ServeCodec(codec ServerCodec, options CodecOption) {
 	defer codec.close()
 
-	// Don't serve if server is stopped.
-	if atomic.LoadInt32(&s.run) == 0 {
+	if !s.trackCodec(codec) {
 		return
 	}
+	defer s.untrackCodec(codec)
 
-	// Add the codec to the set so it can be closed by Stop.
-	s.codecs.Add(codec)
-	defer s.codecs.Remove(codec)
-
-	c := initClient(codec, s.idgen, &s.services)
+	cfg := &clientConfig{
+		idgen:              s.idgen,
+		batchItemLimit:     s.batchItemLimit,
+		batchResponseLimit: s.batchResponseLimit,
+	}
+	c := initClient(codec, &s.services, cfg)
 	<-codec.closed()
 	c.Close()
+}
+
+func (s *Server) trackCodec(codec ServerCodec) bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if !s.run.Load() {
+		return false // Don't serve if server is stopped.
+	}
+
+	s.codecs[codec] = struct{}{}
+
+	return true
+}
+
+func (s *Server) untrackCodec(codec ServerCodec) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	delete(s.codecs, codec)
 }
 
 // serveSingleRequest reads and processes a single RPC request from the given codec. This
@@ -93,24 +177,37 @@ func (s *Server) ServeCodec(codec ServerCodec, options CodecOption) {
 // this mode.
 func (s *Server) serveSingleRequest(ctx context.Context, codec ServerCodec) {
 	// Don't serve if server is stopped.
-	if atomic.LoadInt32(&s.run) == 0 {
+	if !s.run.Load() {
 		return
 	}
 
-	h := newHandler(ctx, codec, s.idgen, &s.services)
+	h := newHandler(ctx, codec, s.idgen, &s.services, s.executionPool, s.batchItemLimit, s.batchResponseLimit)
+
 	h.allowSubscribe = false
 	defer h.close(io.EOF, nil)
 
 	reqs, batch, err := codec.readBatch()
 	if err != nil {
 		if err != io.EOF {
-			codec.writeJSON(ctx, errorMessage(&invalidMessageError{"parse error"}))
+			resp := errorMessage(&invalidMessageError{"parse error"})
+			_ = codec.writeJSON(ctx, resp, true)
 		}
+
 		return
 	}
+
 	if batch {
-		h.handleBatch(reqs)
+		if s.BatchLimit > 0 && len(reqs) > int(s.BatchLimit) {
+			if err1 := codec.writeJSON(ctx, errorMessage(fmt.Errorf("batch limit %d exceeded: %d requests given", s.BatchLimit, len(reqs))), true); err1 != nil {
+				log.Warn("WARNING - requests given exceeds the batch limit", "err", err1)
+				log.Debug("batch limit %d exceeded: %d requests given", s.BatchLimit, len(reqs))
+			}
+		} else {
+			//nolint:contextcheck
+			h.handleBatch(reqs)
+		}
 	} else {
+		//nolint:contextcheck
 		h.handleMsg(reqs[0])
 	}
 }
@@ -119,12 +216,17 @@ func (s *Server) serveSingleRequest(ctx context.Context, codec ServerCodec) {
 // requests to finish, then closes all codecs which will cancel pending requests and
 // subscriptions.
 func (s *Server) Stop() {
-	if atomic.CompareAndSwapInt32(&s.run, 1, 0) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	// Stop the execution pool
+	s.executionPool.Stop()
+
+	if s.run.CompareAndSwap(true, false) {
 		log.Debug("RPC server shutting down")
-		s.codecs.Each(func(c interface{}) bool {
-			c.(ServerCodec).close()
-			return true
-		})
+
+		for codec := range s.codecs {
+			codec.close()
+		}
 	}
 }
 
@@ -143,5 +245,41 @@ func (s *RPCService) Modules() map[string]string {
 	for name := range s.server.services.services {
 		modules[name] = "1.0"
 	}
+
 	return modules
+}
+
+// PeerInfo contains information about the remote end of the network connection.
+//
+// This is available within RPC method handlers through the context. Call
+// PeerInfoFromContext to get information about the client connection related to
+// the current method call.
+type PeerInfo struct {
+	// Transport is name of the protocol used by the client.
+	// This can be "http", "ws" or "ipc".
+	Transport string
+
+	// Address of client. This will usually contain the IP address and port.
+	RemoteAddr string
+
+	// Additional information for HTTP and WebSocket connections.
+	HTTP struct {
+		// Protocol version, i.e. "HTTP/1.1". This is not set for WebSocket.
+		Version string
+		// Header values sent by the client.
+		UserAgent string
+		Origin    string
+		Host      string
+	}
+}
+
+type peerInfoContextKey struct{}
+
+// PeerInfoFromContext returns information about the client's network connection.
+// Use this with the context passed to RPC method handler functions.
+//
+// The zero value is returned if no connection info is present in ctx.
+func PeerInfoFromContext(ctx context.Context) PeerInfo {
+	info, _ := ctx.Value(peerInfoContextKey{}).(PeerInfo)
+	return info
 }

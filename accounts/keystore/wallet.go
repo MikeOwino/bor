@@ -19,10 +19,10 @@ package keystore
 import (
 	"math/big"
 
-	ethereum "github.com/maticnetwork/bor"
-	"github.com/maticnetwork/bor/accounts"
-	"github.com/maticnetwork/bor/core/types"
-	"github.com/maticnetwork/bor/crypto"
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // keystoreWallet implements the accounts.Wallet interface for the original
@@ -46,6 +46,7 @@ func (w *keystoreWallet) Status() (string, error) {
 	if _, ok := w.keystore.unlocked[w.account.Address]; ok {
 		return "Unlocked", nil
 	}
+
 	return "Locked", nil
 }
 
@@ -58,7 +59,7 @@ func (w *keystoreWallet) Open(passphrase string) error { return nil }
 func (w *keystoreWallet) Close() error { return nil }
 
 // Accounts implements accounts.Wallet, returning an account list consisting of
-// a single account that the plain kestore wallet contains.
+// a single account that the plain keystore wallet contains.
 func (w *keystoreWallet) Accounts() []accounts.Account {
 	return []accounts.Account{w.account}
 }
@@ -93,12 +94,12 @@ func (w *keystoreWallet) signHash(account accounts.Account, hash []byte) ([]byte
 	return w.keystore.SignHash(account, hash)
 }
 
-// SignData signs keccak256(data). The mimetype parameter describes the type of data being signed
+// SignData signs keccak256(data). The mimetype parameter describes the type of data being signed.
 func (w *keystoreWallet) SignData(account accounts.Account, mimeType string, data []byte) ([]byte, error) {
 	return w.signHash(account, crypto.Keccak256(data))
 }
 
-// SignDataWithPassphrase signs keccak256(data). The mimetype parameter describes the type of data being signed
+// SignDataWithPassphrase signs keccak256(data). The mimetype parameter describes the type of data being signed.
 func (w *keystoreWallet) SignDataWithPassphrase(account accounts.Account, passphrase, mimeType string, data []byte) ([]byte, error) {
 	// Make sure the requested account is contained within
 	if !w.Contains(account) {
@@ -108,12 +109,14 @@ func (w *keystoreWallet) SignDataWithPassphrase(account accounts.Account, passph
 	return w.keystore.SignHashWithPassphrase(account, passphrase, crypto.Keccak256(data))
 }
 
+// SignText implements accounts.Wallet, attempting to sign the hash of
+// the given text with the given account.
 func (w *keystoreWallet) SignText(account accounts.Account, text []byte) ([]byte, error) {
 	return w.signHash(account, accounts.TextHash(text))
 }
 
 // SignTextWithPassphrase implements accounts.Wallet, attempting to sign the
-// given hash with the given account using passphrase as extra authentication.
+// hash of the given text with the given account using passphrase as extra authentication.
 func (w *keystoreWallet) SignTextWithPassphrase(account accounts.Account, passphrase string, text []byte) ([]byte, error) {
 	// Make sure the requested account is contained within
 	if !w.Contains(account) {

@@ -9,8 +9,13 @@
 //
 // This package specifically implements the Optimal Ate pairing over a 256-bit
 // Barreto-Naehrig curve as described in
-// http://cryptojedi.org/papers/dclxvi-20100714.pdf. Its output is compatible
-// with the implementation described in that paper.
+// http://cryptojedi.org/papers/dclxvi-20100714.pdf. Its output is not
+// compatible with the implementation described in that paper, as different
+// parameters are chosen.
+//
+// (This package previously claimed to operate at a 128-bit security level.
+// However, recent improvements in attacks mean that is no longer true. See
+// https://moderncrypto.org/mail-archive/curves/2016/000740.html.)
 package bn256
 
 import (
@@ -23,7 +28,7 @@ import (
 func randomK(r io.Reader) (k *big.Int, err error) {
 	for {
 		k, err = rand.Int(r, Order)
-		if k.Sign() > 0 || err != nil {
+		if err != nil || k.Sign() > 0 {
 			return
 		}
 	}
@@ -55,7 +60,9 @@ func (e *G1) ScalarBaseMult(k *big.Int) *G1 {
 	if e.p == nil {
 		e.p = &curvePoint{}
 	}
+
 	e.p.Mul(curveGen, k)
+
 	return e
 }
 
@@ -64,7 +71,9 @@ func (e *G1) ScalarMult(a *G1, k *big.Int) *G1 {
 	if e.p == nil {
 		e.p = &curvePoint{}
 	}
+
 	e.p.Mul(a.p, k)
+
 	return e
 }
 
@@ -73,7 +82,9 @@ func (e *G1) Add(a, b *G1) *G1 {
 	if e.p == nil {
 		e.p = &curvePoint{}
 	}
+
 	e.p.Add(a.p, b.p)
+
 	return e
 }
 
@@ -82,7 +93,9 @@ func (e *G1) Neg(a *G1) *G1 {
 	if e.p == nil {
 		e.p = &curvePoint{}
 	}
+
 	e.p.Neg(a.p)
+
 	return e
 }
 
@@ -91,7 +104,9 @@ func (e *G1) Set(a *G1) *G1 {
 	if e.p == nil {
 		e.p = &curvePoint{}
 	}
+
 	e.p.Set(a.p)
+
 	return e
 }
 
@@ -105,10 +120,12 @@ func (e *G1) Marshal() []byte {
 	}
 
 	e.p.MakeAffine()
+
 	ret := make([]byte, numBytes*2)
 	if e.p.IsInfinity() {
 		return ret
 	}
+
 	temp := &gfP{}
 
 	montDecode(temp, &e.p.x)
@@ -133,10 +150,12 @@ func (e *G1) Unmarshal(m []byte) ([]byte, error) {
 	} else {
 		e.p.x, e.p.y = gfP{0}, gfP{0}
 	}
+
 	var err error
 	if err = e.p.x.Unmarshal(m); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.Unmarshal(m[numBytes:]); err != nil {
 		return nil, err
 	}
@@ -158,6 +177,7 @@ func (e *G1) Unmarshal(m []byte) ([]byte, error) {
 			return nil, errors.New("bn256: malformed point")
 		}
 	}
+
 	return m[2*numBytes:], nil
 }
 
@@ -187,7 +207,9 @@ func (e *G2) ScalarBaseMult(k *big.Int) *G2 {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	e.p.Mul(twistGen, k)
+
 	return e
 }
 
@@ -196,7 +218,9 @@ func (e *G2) ScalarMult(a *G2, k *big.Int) *G2 {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	e.p.Mul(a.p, k)
+
 	return e
 }
 
@@ -205,7 +229,9 @@ func (e *G2) Add(a, b *G2) *G2 {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	e.p.Add(a.p, b.p)
+
 	return e
 }
 
@@ -214,7 +240,9 @@ func (e *G2) Neg(a *G2) *G2 {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	e.p.Neg(a.p)
+
 	return e
 }
 
@@ -223,7 +251,9 @@ func (e *G2) Set(a *G2) *G2 {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	e.p.Set(a.p)
+
 	return e
 }
 
@@ -237,10 +267,12 @@ func (e *G2) Marshal() []byte {
 	}
 
 	e.p.MakeAffine()
+
 	ret := make([]byte, numBytes*4)
 	if e.p.IsInfinity() {
 		return ret
 	}
+
 	temp := &gfP{}
 
 	montDecode(temp, &e.p.x.x)
@@ -267,16 +299,20 @@ func (e *G2) Unmarshal(m []byte) ([]byte, error) {
 	if e.p == nil {
 		e.p = &twistPoint{}
 	}
+
 	var err error
 	if err = e.p.x.x.Unmarshal(m); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.y.Unmarshal(m[numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.x.Unmarshal(m[2*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.y.Unmarshal(m[3*numBytes:]); err != nil {
 		return nil, err
 	}
@@ -299,6 +335,7 @@ func (e *G2) Unmarshal(m []byte) ([]byte, error) {
 			return nil, errors.New("bn256: malformed point")
 		}
 	}
+
 	return m[4*numBytes:], nil
 }
 
@@ -322,8 +359,10 @@ func PairingCheck(a []*G1, b []*G2) bool {
 		if a[i].p.IsInfinity() || b[i].p.IsInfinity() {
 			continue
 		}
+
 		acc.Mul(acc, miller(b[i].p, a[i].p))
 	}
+
 	return finalExponentiation(acc).IsOne()
 }
 
@@ -343,7 +382,9 @@ func (e *GT) ScalarMult(a *GT, k *big.Int) *GT {
 	if e.p == nil {
 		e.p = &gfP12{}
 	}
+
 	e.p.Exp(a.p, k)
+
 	return e
 }
 
@@ -352,7 +393,9 @@ func (e *GT) Add(a, b *GT) *GT {
 	if e.p == nil {
 		e.p = &gfP12{}
 	}
+
 	e.p.Mul(a.p, b.p)
+
 	return e
 }
 
@@ -361,7 +404,9 @@ func (e *GT) Neg(a *GT) *GT {
 	if e.p == nil {
 		e.p = &gfP12{}
 	}
+
 	e.p.Conjugate(a.p)
+
 	return e
 }
 
@@ -370,7 +415,9 @@ func (e *GT) Set(a *GT) *GT {
 	if e.p == nil {
 		e.p = &gfP12{}
 	}
+
 	e.p.Set(a.p)
+
 	return e
 }
 
@@ -378,6 +425,7 @@ func (e *GT) Set(a *GT) *GT {
 func (e *GT) Finalize() *GT {
 	ret := finalExponentiation(e.p)
 	e.p.Set(ret)
+
 	return e
 }
 
@@ -440,39 +488,51 @@ func (e *GT) Unmarshal(m []byte) ([]byte, error) {
 	if err = e.p.x.x.x.Unmarshal(m); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.x.y.Unmarshal(m[numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.y.x.Unmarshal(m[2*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.y.y.Unmarshal(m[3*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.z.x.Unmarshal(m[4*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.x.z.y.Unmarshal(m[5*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.x.x.Unmarshal(m[6*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.x.y.Unmarshal(m[7*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.y.x.Unmarshal(m[8*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.y.y.Unmarshal(m[9*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.z.x.Unmarshal(m[10*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	if err = e.p.y.z.y.Unmarshal(m[11*numBytes:]); err != nil {
 		return nil, err
 	}
+
 	montEncode(&e.p.x.x.x, &e.p.x.x.x)
 	montEncode(&e.p.x.x.y, &e.p.x.x.y)
 	montEncode(&e.p.x.y.x, &e.p.x.y.x)

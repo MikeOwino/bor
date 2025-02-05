@@ -21,11 +21,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"testing"
 	"testing/quick"
 
-	"github.com/maticnetwork/bor/p2p/enr"
-	"github.com/maticnetwork/bor/rlp"
+	"github.com/ethereum/go-ethereum/p2p/enr"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -38,6 +39,7 @@ func TestPythonInterop(t *testing.T) {
 	if err := rlp.DecodeBytes(pyRecord, &r); err != nil {
 		t.Fatalf("can't decode: %v", err)
 	}
+
 	n, err := New(ValidSchemes, &r)
 	if err != nil {
 		t.Fatalf("can't verify record: %v", err)
@@ -49,18 +51,182 @@ func TestPythonInterop(t *testing.T) {
 		wantIP  = enr.IPv4{127, 0, 0, 1}
 		wantUDP = enr.UDP(30303)
 	)
+
 	if n.Seq() != wantSeq {
 		t.Errorf("wrong seq: got %d, want %d", n.Seq(), wantSeq)
 	}
+
 	if n.ID() != wantID {
 		t.Errorf("wrong id: got %x, want %x", n.ID(), wantID)
 	}
+
 	want := map[enr.Entry]interface{}{new(enr.IPv4): &wantIP, new(enr.UDP): &wantUDP}
 	for k, v := range want {
 		desc := fmt.Sprintf("loading key %q", k.ENRKey())
 		if assert.NoError(t, n.Load(k), desc) {
 			assert.Equal(t, k, v, desc)
 		}
+	}
+}
+
+func TestNodeEndpoints(t *testing.T) {
+	id := HexID("00000000000000806ad9b61fa5ae014307ebdc964253adcd9f2c0a392aa11abc")
+	type endpointTest struct {
+		name    string
+		node    *Node
+		wantIP  netip.Addr
+		wantUDP int
+		wantTCP int
+	}
+	tests := []endpointTest{
+		{
+			name: "no-addr",
+			node: func() *Node {
+				var r enr.Record
+				return SignNull(&r, id)
+			}(),
+		},
+		{
+			name: "udp-only",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.UDP(9000))
+				return SignNull(&r, id)
+			}(),
+		},
+		{
+			name: "tcp-only",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.TCP(9000))
+				return SignNull(&r, id)
+			}(),
+		},
+		{
+			name: "ipv4-only-loopback",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("127.0.0.1")))
+				return SignNull(&r, id)
+			}(),
+			wantIP: netip.MustParseAddr("127.0.0.1"),
+		},
+		{
+			name: "ipv4-only-unspecified",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("0.0.0.0")))
+				return SignNull(&r, id)
+			}(),
+			wantIP: netip.MustParseAddr("0.0.0.0"),
+		},
+		{
+			name: "ipv4-only",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("99.22.33.1")))
+				return SignNull(&r, id)
+			}(),
+			wantIP: netip.MustParseAddr("99.22.33.1"),
+		},
+		{
+			name: "ipv6-only",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("2001::ff00:0042:8329")))
+				return SignNull(&r, id)
+			}(),
+			wantIP: netip.MustParseAddr("2001::ff00:0042:8329"),
+		},
+		{
+			name: "ipv4-loopback-and-ipv6-global",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("127.0.0.1")))
+				r.Set(enr.UDP(30304))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("2001::ff00:0042:8329")))
+				r.Set(enr.UDP6(30306))
+				return SignNull(&r, id)
+			}(),
+			wantIP:  netip.MustParseAddr("2001::ff00:0042:8329"),
+			wantUDP: 30306,
+		},
+		{
+			name: "ipv4-unspecified-and-ipv6-loopback",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("0.0.0.0")))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("::1")))
+				return SignNull(&r, id)
+			}(),
+			wantIP: netip.MustParseAddr("::1"),
+		},
+		{
+			name: "ipv4-private-and-ipv6-global",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("192.168.2.2")))
+				r.Set(enr.UDP(30304))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("2001::ff00:0042:8329")))
+				r.Set(enr.UDP6(30306))
+				return SignNull(&r, id)
+			}(),
+			wantIP:  netip.MustParseAddr("2001::ff00:0042:8329"),
+			wantUDP: 30306,
+		},
+		{
+			name: "ipv4-local-and-ipv6-global",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("169.254.2.6")))
+				r.Set(enr.UDP(30304))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("2001::ff00:0042:8329")))
+				r.Set(enr.UDP6(30306))
+				return SignNull(&r, id)
+			}(),
+			wantIP:  netip.MustParseAddr("2001::ff00:0042:8329"),
+			wantUDP: 30306,
+		},
+		{
+			name: "ipv4-private-and-ipv6-private",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("192.168.2.2")))
+				r.Set(enr.UDP(30304))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("fd00::abcd:1")))
+				r.Set(enr.UDP6(30306))
+				return SignNull(&r, id)
+			}(),
+			wantIP:  netip.MustParseAddr("192.168.2.2"),
+			wantUDP: 30304,
+		},
+		{
+			name: "ipv4-private-and-ipv6-link-local",
+			node: func() *Node {
+				var r enr.Record
+				r.Set(enr.IPv4Addr(netip.MustParseAddr("192.168.2.2")))
+				r.Set(enr.UDP(30304))
+				r.Set(enr.IPv6Addr(netip.MustParseAddr("fe80::1")))
+				r.Set(enr.UDP6(30306))
+				return SignNull(&r, id)
+			}(),
+			wantIP:  netip.MustParseAddr("192.168.2.2"),
+			wantUDP: 30304,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantIP != test.node.IPAddr() {
+				t.Errorf("node has wrong IP %v, want %v", test.node.IPAddr(), test.wantIP)
+			}
+			if test.wantUDP != test.node.UDP() {
+				t.Errorf("node has wrong UDP port %d, want %d", test.node.UDP(), test.wantUDP)
+			}
+			if test.wantTCP != test.node.TCP() {
+				t.Errorf("node has wrong TCP port %d, want %d", test.node.TCP(), test.wantTCP)
+			}
+		})
 	}
 }
 
@@ -72,6 +238,7 @@ func TestHexID(t *testing.T) {
 	if id1 != ref {
 		t.Errorf("wrong id1\ngot  %v\nwant %v", id1[:], ref[:])
 	}
+
 	if id2 != ref {
 		t.Errorf("wrong id2\ngot  %v\nwant %v", id2[:], ref[:])
 	}
@@ -90,6 +257,7 @@ func TestID_textEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(text, []byte(hex)) {
 		t.Fatalf("text encoding did not match\nexpected: %s\ngot:      %s", hex, text)
 	}
@@ -98,6 +266,7 @@ func TestID_textEncoding(t *testing.T) {
 	if err := id.UnmarshalText(text); err != nil {
 		t.Fatal(err)
 	}
+
 	if *id != ref {
 		t.Fatalf("text decoding did not match\nexpected: %s\ngot:      %s", ref, id)
 	}
@@ -108,6 +277,7 @@ func TestID_distcmp(t *testing.T) {
 		tbig := new(big.Int).SetBytes(target[:])
 		abig := new(big.Int).SetBytes(a[:])
 		bbig := new(big.Int).SetBytes(b[:])
+
 		return new(big.Int).Xor(tbig, abig).Cmp(new(big.Int).Xor(tbig, bbig))
 	}
 	if err := quick.CheckEqual(DistCmp, distcmpBig, nil); err != nil {
@@ -120,6 +290,7 @@ func TestID_distcmp(t *testing.T) {
 func TestID_distcmpEqual(t *testing.T) {
 	base := ID{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 	x := ID{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0}
+
 	if DistCmp(base, x, x) != 0 {
 		t.Errorf("DistCmp(base, x, x) != 0")
 	}

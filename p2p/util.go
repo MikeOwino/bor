@@ -19,7 +19,7 @@ package p2p
 import (
 	"container/heap"
 
-	"github.com/maticnetwork/bor/common/mclock"
+	"github.com/ethereum/go-ethereum/common/mclock"
 )
 
 // expHeap tracks strings and their expiry time.
@@ -48,6 +48,7 @@ func (h expHeap) contains(item string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -70,6 +71,8 @@ func (h *expHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	x := old[n-1]
+	old[n-1] = expItem{}
 	*h = old[0 : n-1]
+
 	return x
 }

@@ -23,9 +23,9 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/maticnetwork/bor/crypto"
-	"github.com/maticnetwork/bor/p2p/enr"
-	"github.com/maticnetwork/bor/rlp"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/p2p/enr"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +42,7 @@ func TestEmptyNodeID(t *testing.T) {
 	}
 
 	require.NoError(t, SignV4(&r, privkey))
+
 	expected := "a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7"
 	assert.Equal(t, expected, hex.EncodeToString(ValidSchemes.NodeAddr(&r)))
 }
@@ -52,9 +53,11 @@ func TestSignError(t *testing.T) {
 
 	var r enr.Record
 	emptyEnc, _ := rlp.EncodeToBytes(&r)
+
 	if err := SignV4(&r, invalidKey); err == nil {
 		t.Fatal("expected error from SignV4")
 	}
+
 	newEnc, _ := rlp.EncodeToBytes(&r)
 	if !bytes.Equal(newEnc, emptyEnc) {
 		t.Fatal("record modified even though signing failed")
@@ -69,6 +72,7 @@ func TestGetSetSecp256k1(t *testing.T) {
 	}
 
 	var pk Secp256k1
+
 	require.NoError(t, r.Load(&pk))
 	assert.EqualValues(t, pubkey, &pk)
 }

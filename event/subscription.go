@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/maticnetwork/bor/common/mclock"
+	"github.com/ethereum/go-ethereum/common/mclock"
 )
 
 // Subscription represents a stream of events. The carrier of the events is typically a
@@ -53,13 +53,16 @@ func NewSubscription(producer func(<-chan struct{}) error) Subscription {
 		err := producer(s.unsub)
 		s.mu.Lock()
 		defer s.mu.Unlock()
+
 		if !s.unsubscribed {
 			if err != nil {
 				s.err <- err
 			}
+
 			s.unsubscribed = true
 		}
 	}()
+
 	return s
 }
 
@@ -76,6 +79,7 @@ func (s *funcSub) Unsubscribe() {
 		s.mu.Unlock()
 		return
 	}
+
 	s.unsubscribed = true
 	close(s.unsub)
 	s.mu.Unlock()
@@ -95,26 +99,50 @@ func (s *funcSub) Err() <-chan error {
 // Resubscribe applies backoff between calls to fn. The time between calls is adapted
 // based on the error rate, but will never exceed backoffMax.
 func Resubscribe(backoffMax time.Duration, fn ResubscribeFunc) Subscription {
-	s := &resubscribeSub{
-		waitTime:   backoffMax / 10,
-		backoffMax: backoffMax,
-		fn:         fn,
-		err:        make(chan error),
-		unsub:      make(chan struct{}),
-	}
-	go s.loop()
-	return s
+	return ResubscribeErr(backoffMax, func(ctx context.Context, _ error) (Subscription, error) {
+		return fn(ctx)
+	})
 }
 
 // A ResubscribeFunc attempts to establish a subscription.
 type ResubscribeFunc func(context.Context) (Subscription, error)
 
+// ResubscribeErr calls fn repeatedly to keep a subscription established. When the
+// subscription is established, ResubscribeErr waits for it to fail and calls fn again. This
+// process repeats until Unsubscribe is called or the active subscription ends
+// successfully.
+//
+// The difference between Resubscribe and ResubscribeErr is that with ResubscribeErr,
+// the error of the failing subscription is available to the callback for logging
+// purposes.
+//
+// ResubscribeErr applies backoff between calls to fn. The time between calls is adapted
+// based on the error rate, but will never exceed backoffMax.
+func ResubscribeErr(backoffMax time.Duration, fn ResubscribeErrFunc) Subscription {
+	s := &resubscribeSub{
+		waitTime:   backoffMax / 10,
+		backoffMax: backoffMax,
+		fn:         fn,
+		err:        make(chan error),
+		unsub:      make(chan struct{}, 1),
+	}
+	go s.loop()
+
+	return s
+}
+
+// A ResubscribeErrFunc attempts to establish a subscription.
+// For every call but the first, the second argument to this function is
+// the error that occurred with the previous subscription.
+type ResubscribeErrFunc func(context.Context, error) (Subscription, error)
+
 type resubscribeSub struct {
-	fn                   ResubscribeFunc
+	fn                   ResubscribeErrFunc
 	err                  chan error
 	unsub                chan struct{}
 	unsubOnce            sync.Once
 	lastTry              mclock.AbsTime
+	lastSubErr           error
 	waitTime, backoffMax time.Duration
 }
 
@@ -131,12 +159,14 @@ func (s *resubscribeSub) Err() <-chan error {
 
 func (s *resubscribeSub) loop() {
 	defer close(s.err)
+
 	var done bool
 	for !done {
 		sub := s.subscribe()
 		if sub == nil {
 			break
 		}
+
 		done = s.waitForError(sub)
 		sub.Unsubscribe()
 	}
@@ -144,22 +174,27 @@ func (s *resubscribeSub) loop() {
 
 func (s *resubscribeSub) subscribe() Subscription {
 	subscribed := make(chan error)
+
 	var sub Subscription
+
 	for {
 		s.lastTry = mclock.Now()
 		ctx, cancel := context.WithCancel(context.Background())
+
 		go func() {
-			rsub, err := s.fn(ctx)
+			rsub, err := s.fn(ctx, s.lastSubErr)
 			sub = rsub
 			subscribed <- err
 		}()
 		select {
 		case err := <-subscribed:
 			cancel()
+
 			if err == nil {
 				if sub == nil {
 					panic("event: ResubscribeFunc returned nil subscription and no error")
 				}
+
 				return sub
 			}
 			// Subscribing failed, wait before launching the next try.
@@ -169,6 +204,7 @@ func (s *resubscribeSub) subscribe() Subscription {
 		case <-s.unsub:
 			cancel()
 			<-subscribed // avoid leaking the s.fn goroutine.
+
 			return nil
 		}
 	}
@@ -178,6 +214,7 @@ func (s *resubscribeSub) waitForError(sub Subscription) bool {
 	defer sub.Unsubscribe()
 	select {
 	case err := <-sub.Err():
+		s.lastSubErr = err
 		return err == nil
 	case <-s.unsub:
 		return true
@@ -228,14 +265,18 @@ type scopeSub struct {
 func (sc *SubscriptionScope) Track(s Subscription) Subscription {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+
 	if sc.closed {
 		return nil
 	}
+
 	if sc.subs == nil {
 		sc.subs = make(map[*scopeSub]struct{})
 	}
+
 	ss := &scopeSub{sc, s}
 	sc.subs[ss] = struct{}{}
+
 	return ss
 }
 
@@ -244,13 +285,16 @@ func (sc *SubscriptionScope) Track(s Subscription) Subscription {
 func (sc *SubscriptionScope) Close() {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+
 	if sc.closed {
 		return
 	}
+
 	sc.closed = true
 	for s := range sc.subs {
 		s.s.Unsubscribe()
 	}
+
 	sc.subs = nil
 }
 
@@ -259,6 +303,7 @@ func (sc *SubscriptionScope) Close() {
 func (sc *SubscriptionScope) Count() int {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+
 	return len(sc.subs)
 }
 
