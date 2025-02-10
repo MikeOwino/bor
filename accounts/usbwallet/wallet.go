@@ -25,13 +25,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/karalabe/usb"
-	ethereum "github.com/maticnetwork/bor"
-	"github.com/maticnetwork/bor/accounts"
-	"github.com/maticnetwork/bor/common"
-	"github.com/maticnetwork/bor/core/types"
-	"github.com/maticnetwork/bor/crypto"
-	"github.com/maticnetwork/bor/log"
+	ethereum "github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/karalabe/hid"
 )
 
 // Maximum time between wallet health checks to detect USB unplugs.
@@ -67,6 +67,8 @@ type driver interface {
 	// SignTx sends the transaction to the USB device and waits for the user to confirm
 	// or deny the transaction.
 	SignTx(path accounts.DerivationPath, tx *types.Transaction, chainID *big.Int) (common.Address, *types.Transaction, error)
+
+	SignTypedMessage(path accounts.DerivationPath, messageHash []byte, domainHash []byte) ([]byte, error)
 }
 
 // wallet represents the common functionality shared by all USB hardware
@@ -77,8 +79,8 @@ type wallet struct {
 	driver driver        // Hardware implementation of the low level device operations
 	url    *accounts.URL // Textual URL uniquely identifying this wallet
 
-	info   usb.DeviceInfo // Known USB device infos about the wallet
-	device usb.Device     // USB device advertising itself as a hardware wallet
+	info   hid.DeviceInfo // Known USB device infos about the wallet
+	device hid.Device     // USB device advertising itself as a hardware wallet
 
 	accounts []accounts.Account                         // List of derive accounts pinned on the hardware wallet
 	paths    map[common.Address]accounts.DerivationPath // Known derivation paths for signing operations
@@ -131,6 +133,7 @@ func (w *wallet) Status() (string, error) {
 	if w.device == nil {
 		return "Closed", failure
 	}
+
 	return status, failure
 }
 
@@ -150,6 +153,7 @@ func (w *wallet) Open(passphrase string) error {
 		if err != nil {
 			return err
 		}
+
 		w.device = device
 		w.commsLock = make(chan struct{}, 1)
 		w.commsLock <- struct{}{} // Enable lock
@@ -185,6 +189,7 @@ func (w *wallet) heartbeat() {
 		errc chan error
 		err  error
 	)
+
 	for errc == nil && err == nil {
 		// Wait until termination is requested or the heartbeat cycle arrives
 		select {
@@ -201,6 +206,7 @@ func (w *wallet) heartbeat() {
 			w.stateLock.RUnlock()
 			continue
 		}
+
 		<-w.commsLock // Don't lock state while resolving version
 		err = w.driver.Heartbeat()
 		w.commsLock <- struct{}{}
@@ -231,6 +237,7 @@ func (w *wallet) Close() error {
 
 	// Terminate the health checks
 	var herr error
+
 	if hQuit != nil {
 		errc := make(chan error)
 		hQuit <- errc
@@ -238,6 +245,7 @@ func (w *wallet) Close() error {
 	}
 	// Terminate the self-derivations
 	var derr error
+
 	if dQuit != nil {
 		errc := make(chan error)
 		dQuit <- errc
@@ -254,9 +262,11 @@ func (w *wallet) Close() error {
 	if err := w.close(); err != nil {
 		return err
 	}
+
 	if herr != nil {
 		return herr
 	}
+
 	return derr
 }
 
@@ -274,6 +284,7 @@ func (w *wallet) close() error {
 	w.device = nil
 
 	w.accounts, w.paths = nil, nil
+
 	return w.driver.Close()
 }
 
@@ -296,6 +307,7 @@ func (w *wallet) Accounts() []accounts.Account {
 
 	cpy := make([]accounts.Account, len(w.accounts))
 	copy(cpy, w.accounts)
+
 	return cpy
 }
 
@@ -311,6 +323,7 @@ func (w *wallet) selfDerive() {
 		errc chan error
 		err  error
 	)
+
 	for errc == nil && err == nil {
 		// Wait until either derivation or termination is requested
 		select {
@@ -325,6 +338,7 @@ func (w *wallet) selfDerive() {
 		if w.device == nil || w.deriveChain == nil {
 			w.stateLock.RUnlock()
 			reqc <- struct{}{}
+
 			continue
 		}
 		select {
@@ -332,6 +346,7 @@ func (w *wallet) selfDerive() {
 		default:
 			w.stateLock.RUnlock()
 			reqc <- struct{}{}
+
 			continue
 		}
 		// Device lock obtained, derive the next batch of accounts
@@ -344,6 +359,7 @@ func (w *wallet) selfDerive() {
 
 			context = context.Background()
 		)
+
 		for i := 0; i < len(nextAddrs); i++ {
 			for empty := false; !empty; {
 				// Retrieve the next derived Ethereum account
@@ -358,28 +374,36 @@ func (w *wallet) selfDerive() {
 					balance *big.Int
 					nonce   uint64
 				)
+
 				balance, err = w.deriveChain.BalanceAt(context, nextAddrs[i], nil)
 				if err != nil {
 					w.log.Warn("USB wallet balance retrieval failed", "err", err)
 					break
 				}
+
 				nonce, err = w.deriveChain.NonceAt(context, nextAddrs[i], nil)
 				if err != nil {
 					w.log.Warn("USB wallet nonce retrieval failed", "err", err)
 					break
 				}
-				// If the next account is empty, stop self-derivation, but add for the last base path
+				// We've just self-derived a new account, start tracking it locally
+				// unless the account was empty.
+				path := make(accounts.DerivationPath, len(nextPaths[i]))
+				copy(path[:], nextPaths[i][:])
+
 				if balance.Sign() == 0 && nonce == 0 {
 					empty = true
+					// If it indeed was empty, make a log output for it anyway. In the case
+					// of legacy-ledger, the first account on the legacy-path will
+					// be shown to the user, even if we don't actively track it
 					if i < len(nextAddrs)-1 {
+						w.log.Info("Skipping tracking first account on legacy path, use personal.deriveAccount(<url>,<path>, false) to track",
+							"path", path, "address", nextAddrs[i])
 						break
 					}
 				}
-				// We've just self-derived a new account, start tracking it locally
-				path := make(accounts.DerivationPath, len(nextPaths[i]))
-				copy(path[:], nextPaths[i][:])
-				paths = append(paths, path)
 
+				paths = append(paths, path)
 				account := accounts.Account{
 					Address: nextAddrs[i],
 					URL:     accounts.URL{Scheme: w.url.Scheme, Path: fmt.Sprintf("%s/%s", w.url.Path, path)},
@@ -417,6 +441,7 @@ func (w *wallet) selfDerive() {
 
 		// Notify the user of termination and loop after a bit of time (to avoid trashing)
 		reqc <- struct{}{}
+
 		if err == nil {
 			select {
 			case errc = <-w.deriveQuit:
@@ -442,6 +467,7 @@ func (w *wallet) Contains(account accounts.Account) bool {
 	defer w.stateLock.RUnlock()
 
 	_, exists := w.paths[account.Address]
+
 	return exists
 }
 
@@ -456,6 +482,7 @@ func (w *wallet) Derive(path accounts.DerivationPath, pin bool) (accounts.Accoun
 		w.stateLock.RUnlock()
 		return accounts.Account{}, accounts.ErrWalletClosed
 	}
+
 	<-w.commsLock // Avoid concurrent hardware access
 	address, err := w.driver.Derive(path)
 	w.commsLock <- struct{}{}
@@ -466,6 +493,7 @@ func (w *wallet) Derive(path accounts.DerivationPath, pin bool) (accounts.Accoun
 	if err != nil {
 		return accounts.Account{}, err
 	}
+
 	account := accounts.Account{
 		Address: address,
 		URL:     accounts.URL{Scheme: w.url.Scheme, Path: fmt.Sprintf("%s/%s", w.url.Path, path)},
@@ -477,11 +505,16 @@ func (w *wallet) Derive(path accounts.DerivationPath, pin bool) (accounts.Accoun
 	w.stateLock.Lock()
 	defer w.stateLock.Unlock()
 
+	if w.device == nil {
+		return accounts.Account{}, accounts.ErrWalletClosed
+	}
+
 	if _, ok := w.paths[address]; !ok {
 		w.accounts = append(w.accounts, account)
 		w.paths[address] = make(accounts.DerivationPath, len(path))
 		copy(w.paths[address], path)
 	}
+
 	return account, nil
 }
 
@@ -489,8 +522,8 @@ func (w *wallet) Derive(path accounts.DerivationPath, pin bool) (accounts.Accoun
 // to discover non zero accounts and automatically add them to list of tracked
 // accounts.
 //
-// Note, self derivaton will increment the last component of the specified path
-// opposed to decending into a child path to allow discovering accounts starting
+// Note, self derivation will increment the last component of the specified path
+// opposed to descending into a child path to allow discovering accounts starting
 // from non zero components.
 //
 // Some hardware wallets switched derivation paths through their evolution, so
@@ -508,6 +541,7 @@ func (w *wallet) SelfDerive(bases []accounts.DerivationPath, chain ethereum.Chai
 		w.deriveNextPaths[i] = make(accounts.DerivationPath, len(base))
 		copy(w.deriveNextPaths[i][:], base[:])
 	}
+
 	w.deriveNextAddrs = make([]common.Address, len(bases))
 	w.deriveChain = chain
 }
@@ -520,7 +554,47 @@ func (w *wallet) signHash(account accounts.Account, hash []byte) ([]byte, error)
 
 // SignData signs keccak256(data). The mimetype parameter describes the type of data being signed
 func (w *wallet) SignData(account accounts.Account, mimeType string, data []byte) ([]byte, error) {
-	return w.signHash(account, crypto.Keccak256(data))
+	// Unless we are doing 712 signing, simply dispatch to signHash
+	if !(mimeType == accounts.MimetypeTypedData && len(data) == 66 && data[0] == 0x19 && data[1] == 0x01) {
+		return w.signHash(account, crypto.Keccak256(data))
+	}
+
+	// dispatch to 712 signing if the mimetype is TypedData and the format matches
+	w.stateLock.RLock() // Comms have own mutex, this is for the state fields
+	defer w.stateLock.RUnlock()
+
+	// If the wallet is closed, abort
+	if w.device == nil {
+		return nil, accounts.ErrWalletClosed
+	}
+	// Make sure the requested account is contained within
+	path, ok := w.paths[account.Address]
+	if !ok {
+		return nil, accounts.ErrUnknownAccount
+	}
+	// All infos gathered and metadata checks out, request signing
+	<-w.commsLock
+
+	defer func() { w.commsLock <- struct{}{} }()
+
+	// Ensure the device isn't screwed with while user confirmation is pending
+	// TODO(karalabe): remove if hotplug lands on Windows
+	w.hub.commsLock.Lock()
+	w.hub.commsPend++
+	w.hub.commsLock.Unlock()
+
+	defer func() {
+		w.hub.commsLock.Lock()
+		w.hub.commsPend--
+		w.hub.commsLock.Unlock()
+	}()
+	// Sign the transaction
+	signature, err := w.driver.SignTypedMessage(path, data[2:34], data[34:66])
+	if err != nil {
+		return nil, err
+	}
+
+	return signature, nil
 }
 
 // SignDataWithPassphrase implements accounts.Wallet, attempting to sign the given
@@ -556,6 +630,7 @@ func (w *wallet) SignTx(account accounts.Account, tx *types.Transaction, chainID
 	}
 	// All infos gathered and metadata checks out, request signing
 	<-w.commsLock
+
 	defer func() { w.commsLock <- struct{}{} }()
 
 	// Ensure the device isn't screwed with while user confirmation is pending
@@ -574,13 +649,15 @@ func (w *wallet) SignTx(account accounts.Account, tx *types.Transaction, chainID
 	if err != nil {
 		return nil, err
 	}
+
 	if sender != account.Address {
 		return nil, fmt.Errorf("signer mismatch: expected %s, got %s", account.Address.Hex(), sender.Hex())
 	}
+
 	return signed, nil
 }
 
-// SignHashWithPassphrase implements accounts.Wallet, however signing arbitrary
+// SignTextWithPassphrase implements accounts.Wallet, however signing arbitrary
 // data is not supported for Ledger wallets, so this method will always return
 // an error.
 func (w *wallet) SignTextWithPassphrase(account accounts.Account, passphrase string, text []byte) ([]byte, error) {

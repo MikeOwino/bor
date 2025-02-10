@@ -1,0 +1,6 @@
+#!/bin/bash
+#
+###############
+# Remove bor installs
+##############
+sudo systemctl daemon-reload

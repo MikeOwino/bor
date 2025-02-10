@@ -23,16 +23,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/maticnetwork/bor/accounts"
-	"github.com/maticnetwork/bor/common"
-	"github.com/maticnetwork/bor/crypto"
-	"github.com/pborman/uuid"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
 )
 
 const (
@@ -99,23 +98,32 @@ func (k *Key) MarshalJSON() (j []byte, err error) {
 		version,
 	}
 	j, err = json.Marshal(jStruct)
+
 	return j, err
 }
 
 func (k *Key) UnmarshalJSON(j []byte) (err error) {
 	keyJSON := new(plainKeyJSON)
+
 	err = json.Unmarshal(j, &keyJSON)
 	if err != nil {
 		return err
 	}
 
 	u := new(uuid.UUID)
-	*u = uuid.Parse(keyJSON.Id)
+
+	*u, err = uuid.Parse(keyJSON.Id)
+	if err != nil {
+		return err
+	}
+
 	k.Id = *u
+
 	addr, err := hex.DecodeString(keyJSON.Address)
 	if err != nil {
 		return err
 	}
+
 	privkey, err := crypto.HexToECDSA(keyJSON.PrivateKey)
 	if err != nil {
 		return err
@@ -128,12 +136,17 @@ func (k *Key) UnmarshalJSON(j []byte) (err error) {
 }
 
 func newKeyFromECDSA(privateKeyECDSA *ecdsa.PrivateKey) *Key {
-	id := uuid.NewRandom()
+	id, err := uuid.NewRandom()
+	if err != nil {
+		panic(fmt.Sprintf("Could not create random uuid: %v", err))
+	}
+
 	key := &Key{
 		Id:         id,
 		Address:    crypto.PubkeyToAddress(privateKeyECDSA.PublicKey),
 		PrivateKey: privateKeyECDSA,
 	}
+
 	return key
 }
 
@@ -142,19 +155,24 @@ func newKeyFromECDSA(privateKeyECDSA *ecdsa.PrivateKey) *Key {
 // retry until the first byte is 0.
 func NewKeyForDirectICAP(rand io.Reader) *Key {
 	randBytes := make([]byte, 64)
+
 	_, err := rand.Read(randBytes)
 	if err != nil {
 		panic("key generation: could not read from random source: " + err.Error())
 	}
+
 	reader := bytes.NewReader(randBytes)
+
 	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), reader)
 	if err != nil {
 		panic("key generation: ecdsa.GenerateKey failed: " + err.Error())
 	}
+
 	key := newKeyFromECDSA(privateKeyECDSA)
 	if !strings.HasPrefix(key.Address.Hex(), "0x00") {
 		return NewKeyForDirectICAP(rand)
 	}
+
 	return key
 }
 
@@ -163,6 +181,7 @@ func newKey(rand io.Reader) (*Key, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return newKeyFromECDSA(privateKeyECDSA), nil
 }
 
@@ -171,6 +190,7 @@ func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Accou
 	if err != nil {
 		return nil, accounts.Account{}, err
 	}
+
 	a := accounts.Account{
 		Address: key.Address,
 		URL:     accounts.URL{Scheme: KeyStoreScheme, Path: ks.JoinPath(keyFileName(key.Address))},
@@ -179,6 +199,7 @@ func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Accou
 		zeroKey(key.PrivateKey)
 		return nil, a, err
 	}
+
 	return key, a, err
 }
 
@@ -191,16 +212,20 @@ func writeTemporaryKeyFile(file string, content []byte) (string, error) {
 	}
 	// Atomic write: create a temporary hidden file first
 	// then move it into place. TempFile assigns mode 0600.
-	f, err := ioutil.TempFile(filepath.Dir(file), "."+filepath.Base(file)+".tmp")
+	f, err := os.CreateTemp(filepath.Dir(file), "."+filepath.Base(file)+".tmp")
 	if err != nil {
 		return "", err
 	}
+
 	if _, err := f.Write(content); err != nil {
 		f.Close()
 		os.Remove(f.Name())
+
 		return "", err
 	}
+
 	f.Close()
+
 	return f.Name(), nil
 }
 
@@ -209,6 +234,7 @@ func writeKeyFile(file string, content []byte) error {
 	if err != nil {
 		return err
 	}
+
 	return os.Rename(name, file)
 }
 
@@ -221,12 +247,14 @@ func keyFileName(keyAddr common.Address) string {
 
 func toISO8601(t time.Time) string {
 	var tz string
+
 	name, offset := t.Zone()
 	if name == "UTC" {
 		tz = "Z"
 	} else {
 		tz = fmt.Sprintf("%03d00", offset/3600)
 	}
+
 	return fmt.Sprintf("%04d-%02d-%02dT%02d-%02d-%02d.%09d%s",
 		t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), tz)
 }

@@ -21,9 +21,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/maticnetwork/bor/common"
-	"github.com/maticnetwork/bor/core/types"
-	"github.com/maticnetwork/bor/log"
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // WaitMined waits for tx to be mined on the blockchain.
@@ -33,16 +34,19 @@ func WaitMined(ctx context.Context, b DeployBackend, tx *types.Transaction) (*ty
 	defer queryTicker.Stop()
 
 	logger := log.New("hash", tx.Hash())
+
 	for {
 		receipt, err := b.TransactionReceipt(ctx, tx.Hash())
-		if receipt != nil {
+		if err == nil {
 			return receipt, nil
 		}
-		if err != nil {
-			logger.Trace("Receipt retrieval failed", "err", err)
-		} else {
+
+		if errors.Is(err, ethereum.NotFound) {
 			logger.Trace("Transaction not yet mined")
+		} else {
+			logger.Trace("Receipt retrieval failed", "err", err)
 		}
+
 		// Wait for the next round.
 		select {
 		case <-ctx.Done():
@@ -58,10 +62,12 @@ func WaitDeployed(ctx context.Context, b DeployBackend, tx *types.Transaction) (
 	if tx.To() != nil {
 		return common.Address{}, errors.New("tx is not contract creation")
 	}
+
 	receipt, err := WaitMined(ctx, b, tx)
 	if err != nil {
 		return common.Address{}, err
 	}
+
 	if receipt.ContractAddress == (common.Address{}) {
 		return common.Address{}, errors.New("zero address")
 	}
@@ -72,5 +78,6 @@ func WaitDeployed(ctx context.Context, b DeployBackend, tx *types.Transaction) (
 	if err == nil && len(code) == 0 {
 		err = ErrNoCodeAfterDeploy
 	}
+
 	return receipt.ContractAddress, err
 }

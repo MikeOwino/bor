@@ -35,6 +35,7 @@ const methoddata = `
 ]`
 
 func TestMethodString(t *testing.T) {
+	t.Parallel()
 	var table = []struct {
 		method      string
 		expectation string
@@ -84,13 +85,15 @@ func TestMethodString(t *testing.T) {
 
 	for _, test := range table {
 		var got string
-		if test.method == "fallback" {
+		switch test.method {
+		case "fallback":
 			got = abi.Fallback.String()
-		} else if test.method == "receive" {
+		case "receive":
 			got = abi.Receive.String()
-		} else {
+		default:
 			got = abi.Methods[test.method].String()
 		}
+
 		if got != test.expectation {
 			t.Errorf("expected string to be %s, got %s", test.expectation, got)
 		}
@@ -98,6 +101,7 @@ func TestMethodString(t *testing.T) {
 }
 
 func TestMethodSig(t *testing.T) {
+	t.Parallel()
 	var cases = []struct {
 		method string
 		expect string
@@ -131,6 +135,7 @@ func TestMethodSig(t *testing.T) {
 			expect: "complexTuple((uint256,uint256)[5][])",
 		},
 	}
+
 	abi, err := JSON(strings.NewReader(methoddata))
 	if err != nil {
 		t.Fatal(err)

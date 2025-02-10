@@ -20,8 +20,8 @@ import (
 	"context"
 	"net"
 
-	"github.com/maticnetwork/bor/log"
-	"github.com/maticnetwork/bor/p2p/netutil"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p/netutil"
 )
 
 // ServeListener accepts connections on l, serving JSON-RPC on them.
@@ -30,12 +30,19 @@ func (s *Server) ServeListener(l net.Listener) error {
 		conn, err := l.Accept()
 		if netutil.IsTemporaryError(err) {
 			log.Warn("RPC accept error", "err", err)
+
 			continue
 		} else if err != nil {
 			return err
 		}
+
 		log.Trace("Accepted RPC connection", "conn", conn.RemoteAddr())
-		go s.ServeCodec(NewCodec(conn), 0)
+
+		s.executionPool.Submit(context.Background(), func() error {
+			s.ServeCodec(NewCodec(conn), 0)
+			s.executionPool.processed.Add(1)
+			return nil
+		})
 	}
 }
 
@@ -46,11 +53,17 @@ func (s *Server) ServeListener(l net.Listener) error {
 // The context is used for the initial connection establishment. It does not
 // affect subsequent interactions with the client.
 func DialIPC(ctx context.Context, endpoint string) (*Client, error) {
-	return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
+	cfg := new(clientConfig)
+	return newClient(ctx, cfg, newClientTransportIPC(endpoint))
+}
+
+func newClientTransportIPC(endpoint string) reconnectFunc {
+	return func(ctx context.Context) (ServerCodec, error) {
 		conn, err := newIPCConnection(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
+
 		return NewCodec(conn), err
-	})
+	}
 }

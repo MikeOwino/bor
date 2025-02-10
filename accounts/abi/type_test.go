@@ -22,15 +22,16 @@ import (
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/maticnetwork/bor/common"
+	"github.com/ethereum/go-ethereum/common"
 )
 
-// typeWithoutStringer is a alias for the Type type which simply doesn't implement
+// typeWithoutStringer is an alias for the Type type which simply doesn't implement
 // the stringer interface to allow printing type details in the tests below.
 type typeWithoutStringer Type
 
 // Tests that all allowed types get recognized by the type parser.
 func TestTypeRegexp(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		blob       string
 		components []ArgumentMarshaling
@@ -110,6 +111,7 @@ func TestTypeRegexp(t *testing.T) {
 		if err != nil {
 			t.Errorf("type %q: failed to parse type string: %v", tt.blob, err)
 		}
+
 		if !reflect.DeepEqual(typ, tt.kind) {
 			t.Errorf("type %q: parsed type mismatch:\nGOT %s\nWANT %s ", tt.blob, spew.Sdump(typeWithoutStringer(typ)), spew.Sdump(typeWithoutStringer(tt.kind)))
 		}
@@ -117,6 +119,7 @@ func TestTypeRegexp(t *testing.T) {
 }
 
 func TestTypeCheck(t *testing.T) {
+	t.Parallel()
 	for i, test := range []struct {
 		typ        string
 		components []ArgumentMarshaling
@@ -255,7 +258,7 @@ func TestTypeCheck(t *testing.T) {
 		{"bytes", nil, [2]byte{0, 1}, "abi: cannot use array as type slice as argument"},
 		{"bytes", nil, common.Hash{1}, "abi: cannot use array as type slice as argument"},
 		{"string", nil, "hello world", ""},
-		{"string", nil, string(""), ""},
+		{"string", nil, "", ""},
 		{"string", nil, []byte{}, "abi: cannot use slice as type string as argument"},
 		{"bytes32[]", nil, [][32]byte{{}}, ""},
 		{"function", nil, [24]byte{}, ""},
@@ -288,6 +291,7 @@ func TestTypeCheck(t *testing.T) {
 			if err.Error() != test.err {
 				t.Errorf("%d failed. Expected err: '%v' got err: '%v'", i, test.err, err)
 			}
+
 			continue
 		}
 
@@ -296,6 +300,7 @@ func TestTypeCheck(t *testing.T) {
 			t.Errorf("%d failed. Expected no err but got: %v", i, err)
 			continue
 		}
+
 		if err == nil && len(test.err) != 0 {
 			t.Errorf("%d failed. Expected err: %v but got none", i, test.err)
 			continue
@@ -308,6 +313,7 @@ func TestTypeCheck(t *testing.T) {
 }
 
 func TestInternalType(t *testing.T) {
+	t.Parallel()
 	components := []ArgumentMarshaling{{Name: "a", Type: "int64"}}
 	internalType := "struct a.b[]"
 	kind := Type{
@@ -323,10 +329,57 @@ func TestInternalType(t *testing.T) {
 
 	blob := "tuple"
 	typ, err := NewType(blob, internalType, components)
+
 	if err != nil {
 		t.Errorf("type %q: failed to parse type string: %v", blob, err)
 	}
+
 	if !reflect.DeepEqual(typ, kind) {
 		t.Errorf("type %q: parsed type mismatch:\nGOT %s\nWANT %s ", blob, spew.Sdump(typeWithoutStringer(typ)), spew.Sdump(typeWithoutStringer(kind)))
+	}
+}
+
+func TestGetTypeSize(t *testing.T) {
+	t.Parallel()
+	var testCases = []struct {
+		typ        string
+		components []ArgumentMarshaling
+		typSize    int
+	}{
+		// simple array
+		{"uint256[2]", nil, 32 * 2},
+		{"address[3]", nil, 32 * 3},
+		{"bytes32[4]", nil, 32 * 4},
+		// array array
+		{"uint256[2][3][4]", nil, 32 * (2 * 3 * 4)},
+		// array tuple
+		{"tuple[2]", []ArgumentMarshaling{{Name: "x", Type: "bytes32"}, {Name: "y", Type: "bytes32"}}, (32 * 2) * 2},
+		// simple tuple
+		{"tuple", []ArgumentMarshaling{{Name: "x", Type: "uint256"}, {Name: "y", Type: "uint256"}}, 32 * 2},
+		// tuple array
+		{"tuple", []ArgumentMarshaling{{Name: "x", Type: "bytes32[2]"}}, 32 * 2},
+		// tuple tuple
+		{"tuple", []ArgumentMarshaling{{Name: "x", Type: "tuple", Components: []ArgumentMarshaling{{Name: "x", Type: "bytes32"}}}}, 32},
+		{"tuple", []ArgumentMarshaling{{Name: "x", Type: "tuple", Components: []ArgumentMarshaling{{Name: "x", Type: "bytes32[2]"}, {Name: "y", Type: "uint256"}}}}, 32 * (2 + 1)},
+	}
+
+	for i, data := range testCases {
+		typ, err := NewType(data.typ, "", data.components)
+		if err != nil {
+			t.Errorf("type %q: failed to parse type string: %v", data.typ, err)
+		}
+
+		result := getTypeSize(typ)
+		if result != data.typSize {
+			t.Errorf("case %d type %q: get type size error: actual: %d expected: %d", i, data.typ, result, data.typSize)
+		}
+	}
+}
+
+func TestNewFixedBytesOver32(t *testing.T) {
+	t.Parallel()
+	_, err := NewType("bytes4096", "", nil)
+	if err == nil {
+		t.Errorf("fixed bytes with size over 32 is not spec'd")
 	}
 }

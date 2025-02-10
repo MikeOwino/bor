@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/maticnetwork/bor/crypto"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // FunctionType represents different types of functions a contract might have.
@@ -45,7 +45,7 @@ const (
 // If the method is `Const` no transaction needs to be created for this
 // particular Method call. It can easily be simulated using a local VM.
 // For example a `Balance()` method only needs to retrieve something
-// from the storage and therefore requires no Tx to be send to the
+// from the storage and therefore requires no Tx to be sent to the
 // network. A method such as `Transact` does require a Tx and thus will
 // be flagged `false`.
 // Input specifies the required input parameters for this gives method.
@@ -54,7 +54,7 @@ type Method struct {
 	// the raw name and a suffix will be added in the case of a function overload.
 	//
 	// e.g.
-	// There are two functions have same name:
+	// These are two functions that have the same name:
 	// * foo(int,int)
 	// * foo(uint,uint)
 	// The method name of the first one will be resolved as foo while the second one
@@ -97,10 +97,12 @@ func NewMethod(name string, rawName string, funType FunctionType, mutability str
 		inputNames  = make([]string, len(inputs))
 		outputNames = make([]string, len(outputs))
 	)
+
 	for i, input := range inputs {
 		inputNames[i] = fmt.Sprintf("%v %v", input.Type, input.Name)
 		types[i] = input.Type.String()
 	}
+
 	for i, output := range outputs {
 		outputNames[i] = output.Type.String()
 		if len(output.Name) > 0 {
@@ -113,28 +115,28 @@ func NewMethod(name string, rawName string, funType FunctionType, mutability str
 		sig string
 		id  []byte
 	)
+
 	if funType == Function {
 		sig = fmt.Sprintf("%v(%v)", rawName, strings.Join(types, ","))
 		id = crypto.Keccak256([]byte(sig))[:4]
 	}
-	// Extract meaningful state mutability of solidity method.
-	// If it's default value, never print it.
-	state := mutability
-	if state == "nonpayable" {
-		state = ""
-	}
-	if state != "" {
-		state = state + " "
-	}
 	identity := fmt.Sprintf("function %v", rawName)
-	if funType == Fallback {
+	switch funType {
+	case Fallback:
 		identity = "fallback"
-	} else if funType == Receive {
+	case Receive:
 		identity = "receive"
-	} else if funType == Constructor {
+	case Constructor:
 		identity = "constructor"
 	}
-	str := fmt.Sprintf("%v(%v) %sreturns(%v)", identity, strings.Join(inputNames, ", "), state, strings.Join(outputNames, ", "))
+	var str string
+	// Extract meaningful state mutability of solidity method.
+	// If it's empty string or default value "nonpayable", never print it.
+	if mutability == "" || mutability == "nonpayable" {
+		str = fmt.Sprintf("%v(%v) returns(%v)", identity, strings.Join(inputNames, ", "), strings.Join(outputNames, ", "))
+	} else {
+		str = fmt.Sprintf("%v(%v) %s returns(%v)", identity, strings.Join(inputNames, ", "), mutability, strings.Join(outputNames, ", "))
+	}
 
 	return Method{
 		Name:            name,

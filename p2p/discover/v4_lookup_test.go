@@ -19,14 +19,14 @@ package discover
 import (
 	"crypto/ecdsa"
 	"fmt"
-	"net"
-	"sort"
+	"net/netip"
+	"slices"
 	"testing"
 
-	"github.com/maticnetwork/bor/crypto"
-	"github.com/maticnetwork/bor/p2p/discover/v4wire"
-	"github.com/maticnetwork/bor/p2p/enode"
-	"github.com/maticnetwork/bor/p2p/enr"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/p2p/discover/v4wire"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/enr"
 )
 
 func TestUDPv4_Lookup(t *testing.T) {
@@ -34,51 +34,59 @@ func TestUDPv4_Lookup(t *testing.T) {
 	test := newUDPTest(t)
 
 	// Lookup on empty table returns no nodes.
-	targetKey, _ := decodePubkey(crypto.S256(), lookupTestnet.target)
+	targetKey, _ := decodePubkey(crypto.S256(), lookupTestnet.target[:])
 	if results := test.udp.LookupPubkey(targetKey); len(results) > 0 {
 		t.Fatalf("lookup on empty table returned %d results: %#v", len(results), results)
 	}
 
 	// Seed table with initial node.
-	fillTable(test.table, []*node{wrapNode(lookupTestnet.node(256, 0))})
+	fillTable(test.table, []*enode.Node{lookupTestnet.node(256, 0)}, true)
 
 	// Start the lookup.
 	resultC := make(chan []*enode.Node, 1)
 	go func() {
 		resultC <- test.udp.LookupPubkey(targetKey)
+
 		test.close()
 	}()
 
 	// Answer lookup packets.
 	serveTestnet(test, lookupTestnet)
 
-// checkLookupResults verifies that the results of a lookup are the closest nodes to
-// the testnet's target.
-func checkLookupResults(t *testing.T, tn *preminedTestnet, results []*enode.Node) {
-	t.Helper()
+	// Verify result nodes.
+	results := <-resultC
+
 	t.Logf("results:")
+
 	for _, e := range results {
-		t.Logf("  ld=%d, %x", enode.LogDist(tn.target.id(), e.ID()), e.ID().Bytes())
+		t.Logf("  ld=%d, %x", enode.LogDist(lookupTestnet.target.id(), e.ID()), e.ID().Bytes())
 	}
+
+	if len(results) != bucketSize {
+		t.Errorf("wrong number of results: got %d, want %d", len(results), bucketSize)
+	}
+
 	checkLookupResults(t, lookupTestnet, results)
 }
 
 func TestUDPv4_LookupIterator(t *testing.T) {
 	t.Parallel()
+
 	test := newUDPTest(t)
 	defer test.close()
 
 	// Seed table with initial nodes.
-	bootnodes := make([]*node, len(lookupTestnet.dists[256]))
+	bootnodes := make([]*enode.Node, len(lookupTestnet.dists[256]))
 	for i := range lookupTestnet.dists[256] {
-		bootnodes[i] = wrapNode(lookupTestnet.node(256, i))
+		bootnodes[i] = lookupTestnet.node(256, i)
 	}
-	fillTable(test.table, bootnodes)
+	fillTable(test.table, bootnodes, true)
 	go serveTestnet(test, lookupTestnet)
 
 	// Create the iterator and collect the nodes it yields.
 	iter := test.udp.RandomNodes()
 	seen := make(map[enode.ID]*enode.Node)
+
 	for limit := lookupTestnet.len(); iter.Next() && len(seen) < limit; {
 		seen[iter.Node().ID()] = iter.Node()
 	}
@@ -89,7 +97,9 @@ func TestUDPv4_LookupIterator(t *testing.T) {
 	for _, n := range seen {
 		results = append(results, n)
 	}
+
 	sortByID(results)
+
 	want := lookupTestnet.nodes()
 	if err := checkNodesEqual(results, want); err != nil {
 		t.Fatal(err)
@@ -100,15 +110,16 @@ func TestUDPv4_LookupIterator(t *testing.T) {
 // method is called.
 func TestUDPv4_LookupIteratorClose(t *testing.T) {
 	t.Parallel()
+
 	test := newUDPTest(t)
 	defer test.close()
 
 	// Seed table with initial nodes.
-	bootnodes := make([]*node, len(lookupTestnet.dists[256]))
+	bootnodes := make([]*enode.Node, len(lookupTestnet.dists[256]))
 	for i := range lookupTestnet.dists[256] {
-		bootnodes[i] = wrapNode(lookupTestnet.node(256, i))
+		bootnodes[i] = lookupTestnet.node(256, i)
 	}
-	fillTable(test.table, bootnodes)
+	fillTable(test.table, bootnodes, true)
 	go serveTestnet(test, lookupTestnet)
 
 	it := test.udp.RandomNodes()
@@ -125,9 +136,11 @@ func TestUDPv4_LookupIteratorClose(t *testing.T) {
 		}
 	}
 	t.Logf("iterator returned %d nodes after close", ncalls)
+
 	if it.Next() {
 		t.Errorf("Next() == true after close and %d more calls", ncalls)
 	}
+
 	if n := it.Node(); n != nil {
 		t.Errorf("iterator returned non-nil node after close and %d more calls", ncalls)
 	}
@@ -135,7 +148,7 @@ func TestUDPv4_LookupIteratorClose(t *testing.T) {
 
 func serveTestnet(test *udpTest, testnet *preminedTestnet) {
 	for done := false; !done; {
-		done = test.waitPacketOut(func(p v4wire.Packet, to *net.UDPAddr, hash []byte) {
+		done = test.waitPacketOut(func(p v4wire.Packet, to netip.AddrPort, hash []byte) {
 			n, key := testnet.nodeByAddr(to)
 			switch p.(type) {
 			case *v4wire.Ping:
@@ -154,15 +167,17 @@ func serveTestnet(test *udpTest, testnet *preminedTestnet) {
 func checkLookupResults(t *testing.T, tn *preminedTestnet, results []*enode.Node) {
 	t.Helper()
 	t.Logf("results:")
+
 	for _, e := range results {
 		t.Logf("  ld=%d, %x", enode.LogDist(tn.target.id(), e.ID()), e.ID().Bytes())
 	}
-	if hasDuplicates(wrapNodes(results)) {
+	if hasDuplicates(results) {
 		t.Errorf("result set contains duplicate entries")
 	}
-	if !sortedByDistanceTo(tn.target.id(), wrapNodes(results)) {
+	if !sortedByDistanceTo(tn.target.id(), results) {
 		t.Errorf("result set not sorted by distance to target")
 	}
+
 	wantNodes := tn.closest(len(results))
 	if err := checkNodesEqual(results, wantNodes); err != nil {
 		t.Error(err)
@@ -239,17 +254,21 @@ func (tn *preminedTestnet) len() int {
 	for _, keys := range tn.dists {
 		n += len(keys)
 	}
+
 	return n
 }
 
 func (tn *preminedTestnet) nodes() []*enode.Node {
 	result := make([]*enode.Node, 0, tn.len())
+
 	for dist, keys := range tn.dists {
 		for index := range keys {
 			result = append(result, tn.node(dist, index))
 		}
 	}
+
 	sortByID(result)
+
 	return result
 }
 
@@ -260,35 +279,45 @@ func (tn *preminedTestnet) node(dist, index int) *enode.Node {
 	rec.Set(enr.UDP(5000))
 	enode.SignV4(rec, key)
 	n, _ := enode.New(enode.ValidSchemes, rec)
+
 	return n
 }
 
-func (tn *preminedTestnet) nodeByAddr(addr *net.UDPAddr) (*enode.Node, *ecdsa.PrivateKey) {
-	dist := int(addr.IP[1])<<8 + int(addr.IP[2])
-	index := int(addr.IP[3])
+func (tn *preminedTestnet) nodeByAddr(addr netip.AddrPort) (*enode.Node, *ecdsa.PrivateKey) {
+	ip := addr.Addr().As4()
+	dist := int(ip[1])<<8 + int(ip[2])
+	index := int(ip[3])
 	key := tn.dists[dist][index]
+
 	return tn.node(dist, index), key
 }
 
 func (tn *preminedTestnet) nodesAtDistance(dist int) []v4wire.Node {
 	result := make([]v4wire.Node, len(tn.dists[dist]))
 	for i := range result {
-		result[i] = nodeToRPC(wrapNode(tn.node(dist, i)))
+		result[i] = nodeToRPC(tn.node(dist, i))
 	}
+
 	return result
 }
 
-func (tn *preminedTestnet) neighborsAtDistance(base *enode.Node, distance uint, elems int) []*enode.Node {
-	nodes := nodesByDistance{target: base.ID()}
+func (tn *preminedTestnet) neighborsAtDistances(base *enode.Node, distances []uint, elems int) []*enode.Node {
+	var result []*enode.Node
+
 	for d := range lookupTestnet.dists {
 		for i := range lookupTestnet.dists[d] {
 			n := lookupTestnet.node(d, i)
-			if uint(enode.LogDist(n.ID(), base.ID())) == distance {
-				nodes.push(wrapNode(n), elems)
+			d := enode.LogDist(base.ID(), n.ID())
+			if slices.Contains(distances, uint(d)) {
+				result = append(result, n)
+				if len(result) >= elems {
+					return result
+				}
 			}
 		}
 	}
-	return unwrapNodes(nodes.entries)
+
+	return result
 }
 
 func (tn *preminedTestnet) closest(n int) (nodes []*enode.Node) {
@@ -297,9 +326,10 @@ func (tn *preminedTestnet) closest(n int) (nodes []*enode.Node) {
 			nodes = append(nodes, tn.node(d, i))
 		}
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		return enode.DistCmp(tn.target.id(), nodes[i].ID(), nodes[j].ID()) < 0
+	slices.SortFunc(nodes, func(a, b *enode.Node) int {
+		return enode.DistCmp(tn.target.id(), a.ID(), b.ID())
 	})
+
 	return nodes[:n]
 }
 
@@ -314,10 +344,12 @@ func (tn *preminedTestnet) mine() {
 	}
 
 	targetSha := tn.target.id()
+
 	found, need := 0, 40
 	for found < need {
 		k := newkey()
 		ld := enode.LogDist(targetSha, encodePubkey(&k.PublicKey).id())
+
 		if len(tn.dists[ld]) < 8 {
 			tn.dists[ld] = append(tn.dists[ld], k)
 			found++
@@ -327,16 +359,21 @@ func (tn *preminedTestnet) mine() {
 	fmt.Printf("&preminedTestnet{\n")
 	fmt.Printf("	target: hexEncPubkey(\"%x\"),\n", tn.target[:])
 	fmt.Printf("	dists: [%d][]*ecdsa.PrivateKey{\n", len(tn.dists))
+
 	for ld, ns := range tn.dists {
 		if len(ns) == 0 {
 			continue
 		}
+
 		fmt.Printf("		%d: {\n", ld)
+
 		for _, key := range ns {
 			fmt.Printf("			hexEncPrivkey(\"%x\"),\n", crypto.FromECDSA(key))
 		}
+
 		fmt.Printf("		},\n")
 	}
+
 	fmt.Printf("	},\n")
 	fmt.Printf("}\n")
 }

@@ -19,6 +19,8 @@ package event
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -37,6 +39,7 @@ func subscribeInts(max, fail int, c chan<- int) Subscription {
 				return nil
 			}
 		}
+
 		return nil
 	})
 }
@@ -69,6 +72,7 @@ loop:
 	if err != nil {
 		t.Fatal("got non-nil error after Unsubscribe")
 	}
+
 	if ok {
 		t.Fatal("channel still open after Unsubscribe")
 	}
@@ -78,6 +82,7 @@ func TestResubscribe(t *testing.T) {
 	t.Parallel()
 
 	var i int
+
 	nfails := 6
 	sub := Resubscribe(100*time.Millisecond, func(ctx context.Context) (Subscription, error) {
 		// fmt.Printf("call #%d @ %v\n", i, time.Now())
@@ -86,14 +91,18 @@ func TestResubscribe(t *testing.T) {
 			// Delay the second failure a bit to reset the resubscribe interval.
 			time.Sleep(200 * time.Millisecond)
 		}
+
 		if i < nfails {
 			return nil, errors.New("oops")
 		}
+
 		sub := NewSubscription(func(unsubscribed <-chan struct{}) error { return nil })
+
 		return sub, nil
 	})
 
 	<-sub.Err()
+
 	if i != nfails {
 		t.Fatalf("resubscribe function called %d times, want %d times", i, nfails)
 	}
@@ -110,11 +119,76 @@ func TestResubscribeAbort(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			done <- errors.New("context given to resubscribe function not canceled within 2s")
 		}
+
 		return nil, nil
 	})
 
 	sub.Unsubscribe()
+
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestResubscribeWithErrorHandler(t *testing.T) {
+	t.Parallel()
+
+	var i int
+
+	nfails := 6
+	subErrs := make([]string, 0)
+	sub := ResubscribeErr(100*time.Millisecond, func(ctx context.Context, lastErr error) (Subscription, error) {
+		i++
+
+		var lastErrVal string
+		if lastErr != nil {
+			lastErrVal = lastErr.Error()
+		}
+
+		subErrs = append(subErrs, lastErrVal)
+		sub := NewSubscription(func(unsubscribed <-chan struct{}) error {
+			if i < nfails {
+				return fmt.Errorf("err-%v", i)
+			} else {
+				return nil
+			}
+		})
+
+		return sub, nil
+	})
+
+	<-sub.Err()
+
+	if i != nfails {
+		t.Fatalf("resubscribe function called %d times, want %d times", i, nfails)
+	}
+
+	expectedSubErrs := []string{"", "err-1", "err-2", "err-3", "err-4", "err-5"}
+	if !reflect.DeepEqual(subErrs, expectedSubErrs) {
+		t.Fatalf("unexpected subscription errors %v, want %v", subErrs, expectedSubErrs)
+	}
+}
+
+func TestResubscribeWithCompletedSubscription(t *testing.T) {
+	t.Parallel()
+
+	quitProducerAck := make(chan struct{})
+	quitProducer := make(chan struct{})
+
+	sub := ResubscribeErr(100*time.Millisecond, func(ctx context.Context, lastErr error) (Subscription, error) {
+		return NewSubscription(func(unsubscribed <-chan struct{}) error {
+			select {
+			case <-quitProducer:
+				quitProducerAck <- struct{}{}
+				return nil
+			case <-unsubscribed:
+				return nil
+			}
+		}), nil
+	})
+
+	// Ensure producer has started and exited before Unsubscribe
+	close(quitProducer)
+	<-quitProducerAck
+	sub.Unsubscribe()
 }

@@ -18,150 +18,149 @@ package utils
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/maticnetwork/bor/eth"
-	"github.com/maticnetwork/bor/node"
-	"gopkg.in/urfave/cli.v1"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/internal/flags"
+	"github.com/urfave/cli/v2"
 )
 
-var ShowDeprecated = cli.Command{
+var ShowDeprecated = &cli.Command{
 	Action:      showDeprecated,
 	Name:        "show-deprecated-flags",
 	Usage:       "Show flags that have been deprecated",
 	ArgsUsage:   " ",
-	Category:    "MISCELLANEOUS COMMANDS",
 	Description: "Show flags that have been deprecated and will soon be removed",
 }
 
 var DeprecatedFlags = []cli.Flag{
-	LegacyTestnetFlag,
-	LegacyLightServFlag,
-	LegacyLightPeersFlag,
-	LegacyMinerThreadsFlag,
-	LegacyMinerGasTargetFlag,
-	LegacyMinerGasPriceFlag,
-	LegacyMinerEtherbaseFlag,
-	LegacyMinerExtraDataFlag,
+	NoUSBFlag,
+	LegacyWhitelistFlag,
+	CacheTrieJournalFlag,
+	CacheTrieRejournalFlag,
+	LegacyDiscoveryV5Flag,
+	TxLookupLimitFlag,
+	LightServeFlag,
+	LightIngressFlag,
+	LightEgressFlag,
+	LightMaxPeersFlag,
+	LightNoPruneFlag,
+	LightNoSyncServeFlag,
+	LogBacktraceAtFlag,
+	LogDebugFlag,
+	MinerNewPayloadTimeoutFlag,
+	MinerEtherbaseFlag,
+	MiningEnabledFlag,
 }
 
 var (
-	// (Deprecated April 2018)
-	LegacyMinerThreadsFlag = cli.IntFlag{
-		Name:  "minerthreads",
-		Usage: "Number of CPU threads to use for mining (deprecated, use --miner.threads)",
-		Value: 0,
+	// Deprecated May 2020, shown in aliased flags section
+	NoUSBFlag = &cli.BoolFlag{
+		Name:     "nousb",
+		Usage:    "Disables monitoring for and managing USB hardware wallets (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyMinerGasTargetFlag = cli.Uint64Flag{
-		Name:  "targetgaslimit",
-		Usage: "Target gas floor for mined blocks (deprecated, use --miner.gastarget)",
-		Value: eth.DefaultConfig.Miner.GasFloor,
+	// Deprecated March 2022
+	LegacyWhitelistFlag = &cli.StringFlag{
+		Name:     "whitelist",
+		Usage:    "Comma separated block number-to-hash mappings to enforce (<number>=<hash>) (deprecated in favor of --eth.requiredblocks)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyMinerGasPriceFlag = BigFlag{
-		Name:  "gasprice",
-		Usage: "Minimum gas price for mining a transaction (deprecated, use --miner.gasprice)",
-		Value: eth.DefaultConfig.Miner.GasPrice,
+	// Deprecated July 2023
+	CacheTrieJournalFlag = &cli.StringFlag{
+		Name:     "cache.trie.journal",
+		Usage:    "Disk journal directory for trie cache to survive node restarts",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyMinerEtherbaseFlag = cli.StringFlag{
-		Name:  "etherbase",
-		Usage: "Public address for block mining rewards (default = first account, deprecated, use --miner.etherbase)",
-		Value: "0",
+	CacheTrieRejournalFlag = &cli.DurationFlag{
+		Name:     "cache.trie.rejournal",
+		Usage:    "Time interval to regenerate the trie cache journal",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyMinerExtraDataFlag = cli.StringFlag{
-		Name:  "extradata",
-		Usage: "Block extra data set by the miner (default = client version, deprecated, use --miner.extradata)",
+	LegacyDiscoveryV5Flag = &cli.BoolFlag{
+		Name:     "v5disc",
+		Usage:    "Enables the experimental RLPx V5 (Topic Discovery) mechanism (deprecated, use --discv5 instead)",
+		Category: flags.DeprecatedCategory,
 	}
-
-	// (Deprecated June 2019)
-	LegacyLightServFlag = cli.IntFlag{
-		Name:  "lightserv",
-		Usage: "Maximum percentage of time allowed for serving LES requests (deprecated, use --light.serve)",
-		Value: eth.DefaultConfig.LightServ,
+	// Deprecated August 2023
+	TxLookupLimitFlag = &cli.Uint64Flag{
+		Name:     "txlookuplimit",
+		Usage:    "Number of recent blocks to maintain transactions index for (default = about one year, 0 = entire chain) (deprecated, use history.transactions instead)",
+		Value:    ethconfig.Defaults.TransactionHistory,
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyLightPeersFlag = cli.IntFlag{
-		Name:  "lightpeers",
-		Usage: "Maximum number of light clients to serve, or light servers to attach to  (deprecated, use --light.maxpeers)",
-		Value: eth.DefaultConfig.LightPeers,
+	// Light server and client settings, Deprecated November 2023
+	LightServeFlag = &cli.IntFlag{
+		Name:     "light.serve",
+		Usage:    "Maximum percentage of time allowed for serving LES requests (deprecated)",
+		Value:    ethconfig.Defaults.LightServ,
+		Category: flags.DeprecatedCategory,
 	}
-
-	// (Deprecated April 2020)
-	LegacyTestnetFlag = cli.BoolFlag{ // TODO(q9f): Remove after Ropsten is discontinued.
-		Name:  "testnet",
-		Usage: "Pre-configured test network (Deprecated: Please choose one of --goerli, --rinkeby, or --ropsten.)",
+	LightIngressFlag = &cli.IntFlag{
+		Name:     "light.ingress",
+		Usage:    "Incoming bandwidth limit for serving light clients (deprecated)",
+		Value:    ethconfig.Defaults.LightIngress,
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCEnabledFlag = cli.BoolFlag{
-		Name:  "rpc",
-		Usage: "Enable the HTTP-RPC server (deprecated, use --http)",
+	LightEgressFlag = &cli.IntFlag{
+		Name:     "light.egress",
+		Usage:    "Outgoing bandwidth limit for serving light clients (deprecated)",
+		Value:    ethconfig.Defaults.LightEgress,
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCListenAddrFlag = cli.StringFlag{
-		Name:  "rpcaddr",
-		Usage: "HTTP-RPC server listening interface (deprecated, use --http.addr)",
-		Value: node.DefaultHTTPHost,
+	LightMaxPeersFlag = &cli.IntFlag{
+		Name:     "light.maxpeers",
+		Usage:    "Maximum number of light clients to serve, or light servers to attach to (deprecated)",
+		Value:    ethconfig.Defaults.LightPeers,
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCPortFlag = cli.IntFlag{
-		Name:  "rpcport",
-		Usage: "HTTP-RPC server listening port (deprecated, use --http.port)",
-		Value: node.DefaultHTTPPort,
+	LightNoPruneFlag = &cli.BoolFlag{
+		Name:     "light.nopruning",
+		Usage:    "Disable ancient light chain data pruning (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCCORSDomainFlag = cli.StringFlag{
-		Name:  "rpccorsdomain",
-		Usage: "Comma separated list of domains from which to accept cross origin requests (browser enforced) (deprecated, use --http.corsdomain)",
-		Value: "",
+	LightNoSyncServeFlag = &cli.BoolFlag{
+		Name:     "light.nosyncserve",
+		Usage:    "Enables serving light clients before syncing (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCVirtualHostsFlag = cli.StringFlag{
-		Name:  "rpcvhosts",
-		Usage: "Comma separated list of virtual hostnames from which to accept requests (server enforced). Accepts '*' wildcard. (deprecated, use --http.vhosts)",
-		Value: strings.Join(node.DefaultConfig.HTTPVirtualHosts, ","),
+	// Deprecated November 2023
+	LogBacktraceAtFlag = &cli.StringFlag{
+		Name:     "log.backtrace",
+		Usage:    "Request a stack trace at a specific logging statement (deprecated)",
+		Value:    "",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyRPCApiFlag = cli.StringFlag{
-		Name:  "rpcapi",
-		Usage: "API's offered over the HTTP-RPC interface (deprecated, use --http.api)",
-		Value: "",
+	LogDebugFlag = &cli.BoolFlag{
+		Name:     "log.debug",
+		Usage:    "Prepends log messages with call-site location (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyWSListenAddrFlag = cli.StringFlag{
-		Name:  "wsaddr",
-		Usage: "WS-RPC server listening interface (deprecated, use --ws.addr)",
-		Value: node.DefaultWSHost,
+	// Deprecated February 2024
+	MinerNewPayloadTimeoutFlag = &cli.DurationFlag{
+		Name:     "miner.newpayload-timeout",
+		Usage:    "Specify the maximum time allowance for creating a new payload (deprecated)",
+		Value:    ethconfig.Defaults.Miner.Recommit,
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyWSPortFlag = cli.IntFlag{
-		Name:  "wsport",
-		Usage: "WS-RPC server listening port (deprecated, use --ws.port)",
-		Value: node.DefaultWSPort,
+	MinerEtherbaseFlag = &cli.StringFlag{
+		Name:     "miner.etherbase",
+		Usage:    "0x prefixed public address for block mining rewards (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyWSApiFlag = cli.StringFlag{
-		Name:  "wsapi",
-		Usage: "API's offered over the WS-RPC interface (deprecated, use --ws.api)",
-		Value: "",
+	MiningEnabledFlag = &cli.BoolFlag{
+		Name:     "mine",
+		Usage:    "Enable mining (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
-	LegacyWSAllowedOriginsFlag = cli.StringFlag{
-		Name:  "wsorigins",
-		Usage: "Origins from which to accept websockets requests (deprecated, use --ws.origins)",
-		Value: "",
-	}
-	LegacyGpoBlocksFlag = cli.IntFlag{
-		Name:  "gpoblocks",
-		Usage: "Number of recent blocks to check for gas prices (deprecated, use --gpo.blocks)",
-		Value: eth.DefaultConfig.GPO.Blocks,
-	}
-	LegacyGpoPercentileFlag = cli.IntFlag{
-		Name:  "gpopercentile",
-		Usage: "Suggested gas price is the given percentile of a set of recent transaction gas prices (deprecated, use --gpo.percentile)",
-		Value: eth.DefaultConfig.GPO.Percentile,
-	}
-	LegacyBootnodesV4Flag = cli.StringFlag{
-		Name:  "bootnodesv4",
-		Usage: "Comma separated enode URLs for P2P v4 discovery bootstrap (light server, full nodes) (deprecated, use --bootnodes)",
-		Value: "",
-	}
-	LegacyBootnodesV5Flag = cli.StringFlag{
-		Name:  "bootnodesv5",
-		Usage: "Comma separated enode URLs for P2P v5 discovery bootstrap (light server, light nodes) (deprecated, use --bootnodes)",
-		Value: "",
+	MetricsEnabledExpensiveFlag = &cli.BoolFlag{
+		Name:     "metrics.expensive",
+		Usage:    "Enable expensive metrics collection and reporting (deprecated)",
+		Category: flags.DeprecatedCategory,
 	}
 )
 
 // showDeprecated displays deprecated flags that will be soon removed from the codebase.
-func showDeprecated(*cli.Context) {
+func showDeprecated(*cli.Context) error {
 	fmt.Println("--------------------------------------------------------------------")
 	fmt.Println("The following flags are deprecated and will be removed in the future!")
 	fmt.Println("--------------------------------------------------------------------")
@@ -170,4 +169,8 @@ func showDeprecated(*cli.Context) {
 	for _, flag := range DeprecatedFlags {
 		fmt.Println(flag.String())
 	}
+
+	fmt.Println()
+
+	return nil
 }

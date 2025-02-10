@@ -17,10 +17,16 @@
 package vm
 
 import (
-	"fmt"
+	"sync"
 
 	"github.com/holiman/uint256"
 )
+
+var stackPool = sync.Pool{
+	New: func() interface{} {
+		return &Stack{data: make([]uint256.Int, 0, 16)}
+	},
+}
 
 // Stack is an object for basic stack operations. Items popped to the stack are
 // expected to be changed and modified. stack does not take care of adding newly
@@ -30,7 +36,12 @@ type Stack struct {
 }
 
 func newstack() *Stack {
-	return &Stack{data: make([]uint256.Int, 0, 16)}
+	return stackPool.Get().(*Stack)
+}
+
+func returnStack(s *Stack) {
+	s.data = s.data[:0]
+	stackPool.Put(s)
 }
 
 // Data returns the underlying uint256.Int array.
@@ -42,14 +53,11 @@ func (st *Stack) push(d *uint256.Int) {
 	// NOTE push limit (1024) is checked in baseCheck
 	st.data = append(st.data, *d)
 }
-func (st *Stack) pushN(ds ...uint256.Int) {
-	// FIXME: Is there a way to pass args by pointers.
-	st.data = append(st.data, ds...)
-}
 
 func (st *Stack) pop() (ret uint256.Int) {
 	ret = st.data[len(st.data)-1]
 	st.data = st.data[:len(st.data)-1]
+
 	return
 }
 
@@ -72,36 +80,4 @@ func (st *Stack) peek() *uint256.Int {
 // Back returns the n'th item in stack
 func (st *Stack) Back(n int) *uint256.Int {
 	return &st.data[st.len()-n-1]
-}
-
-// Print dumps the content of the stack
-func (st *Stack) Print() {
-	fmt.Println("### stack ###")
-	if len(st.data) > 0 {
-		for i, val := range st.data {
-			fmt.Printf("%-3d  %v\n", i, val)
-		}
-	} else {
-		fmt.Println("-- empty --")
-	}
-	fmt.Println("#############")
-}
-
-// ReturnStack is an object for basic return stack operations.
-type ReturnStack struct {
-	data []uint64
-}
-
-func newReturnStack() *ReturnStack {
-	return &ReturnStack{data: make([]uint64, 0, 1024)}
-}
-
-func (st *ReturnStack) push(d uint64) {
-	st.data = append(st.data, d)
-}
-
-func (st *ReturnStack) pop() (ret uint64) {
-	ret = st.data[len(st.data)-1]
-	st.data = st.data[:len(st.data)-1]
-	return
 }

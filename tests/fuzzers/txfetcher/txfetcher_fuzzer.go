@@ -23,10 +23,10 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/maticnetwork/bor/common"
-	"github.com/maticnetwork/bor/common/mclock"
-	"github.com/maticnetwork/bor/core/types"
-	"github.com/maticnetwork/bor/eth/fetcher"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/mclock"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth/fetcher"
 )
 
 var (
@@ -42,17 +42,20 @@ func init() {
 	for i := 0; i < len(peers); i++ {
 		peers[i] = fmt.Sprintf("Peer #%d", i)
 	}
+
 	txs = make([]*types.Transaction, 65536) // We need to bump enough to hit all the limits
 	for i := 0; i < len(txs); i++ {
 		txs[i] = types.NewTransaction(rand.Uint64(), common.Address{byte(rand.Intn(256))}, new(big.Int), 0, new(big.Int), nil)
 	}
 }
 
-func Fuzz(input []byte) int {
+func fuzz(input []byte) int {
 	// Don't generate insanely large test cases, not much value in them
 	if len(input) > 16*1024 {
-		return -1
+		return 0
 	}
+
+	verbose := false
 	r := bytes.NewReader(input)
 
 	// Reduce the problem space for certain fuzz runs. Small tx space is better
@@ -62,6 +65,7 @@ func Fuzz(input []byte) int {
 	if err != nil {
 		return 0
 	}
+
 	switch limit % 4 {
 	case 0:
 		txs = txs[:4]
@@ -82,6 +86,7 @@ func Fuzz(input []byte) int {
 			return make([]error, len(txs))
 		},
 		func(string, []common.Hash) error { return nil },
+		nil,
 		clock, rand,
 	)
 	f.Start()
@@ -94,6 +99,7 @@ func Fuzz(input []byte) int {
 		if err != nil {
 			return 0
 		}
+
 		switch cmd % 4 {
 		case 0:
 			// Notify a new set of transactions:
@@ -104,28 +110,39 @@ func Fuzz(input []byte) int {
 			if err != nil {
 				return 0
 			}
+
 			peer := peers[int(peerIdx)%len(peers)]
 
 			announceCnt, err := r.ReadByte()
 			if err != nil {
 				return 0
 			}
+
 			announce := int(announceCnt) % (2 * len(txs)) // No point in generating too many duplicates
 
 			var (
 				announceIdxs = make([]int, announce)
 				announces    = make([]common.Hash, announce)
+				types        = make([]byte, announce)
+				sizes        = make([]uint32, announce)
 			)
+
 			for i := 0; i < len(announces); i++ {
 				annBuf := make([]byte, 2)
 				if n, err := r.Read(annBuf); err != nil || n != 2 {
 					return 0
 				}
+
 				announceIdxs[i] = (int(annBuf[0])*256 + int(annBuf[1])) % len(txs)
 				announces[i] = txs[announceIdxs[i]].Hash()
+				types[i] = txs[announceIdxs[i]].Type()
+				sizes[i] = uint32(txs[announceIdxs[i]].Size())
 			}
-			fmt.Println("Notify", peer, announceIdxs)
-			if err := f.Notify(peer, announces); err != nil {
+
+			if verbose {
+				fmt.Println("Notify", peer, announceIdxs)
+			}
+			if err := f.Notify(peer, types, sizes, announces); err != nil {
 				panic(err)
 			}
 
@@ -138,33 +155,41 @@ func Fuzz(input []byte) int {
 			if err != nil {
 				return 0
 			}
+
 			peer := peers[int(peerIdx)%len(peers)]
 
 			deliverCnt, err := r.ReadByte()
 			if err != nil {
 				return 0
 			}
+
 			deliver := int(deliverCnt) % (2 * len(txs)) // No point in generating too many duplicates
 
 			var (
 				deliverIdxs = make([]int, deliver)
 				deliveries  = make([]*types.Transaction, deliver)
 			)
+
 			for i := 0; i < len(deliveries); i++ {
 				deliverBuf := make([]byte, 2)
 				if n, err := r.Read(deliverBuf); err != nil || n != 2 {
 					return 0
 				}
+
 				deliverIdxs[i] = (int(deliverBuf[0])*256 + int(deliverBuf[1])) % len(txs)
 				deliveries[i] = txs[deliverIdxs[i]]
 			}
+
 			directFlag, err := r.ReadByte()
 			if err != nil {
 				return 0
 			}
-			direct := (directFlag % 2) == 0
 
-			fmt.Println("Enqueue", peer, deliverIdxs, direct)
+			direct := (directFlag % 2) == 0
+			if verbose {
+				fmt.Println("Enqueue", peer, deliverIdxs, direct)
+			}
+
 			if err := f.Enqueue(peer, deliveries, direct); err != nil {
 				panic(err)
 			}
@@ -176,9 +201,12 @@ func Fuzz(input []byte) int {
 			if err != nil {
 				return 0
 			}
-			peer := peers[int(peerIdx)%len(peers)]
 
-			fmt.Println("Drop", peer)
+			peer := peers[int(peerIdx)%len(peers)]
+			if verbose {
+				fmt.Println("Drop", peer)
+			}
+
 			if err := f.Drop(peer); err != nil {
 				panic(err)
 			}
@@ -190,9 +218,12 @@ func Fuzz(input []byte) int {
 			if err != nil {
 				return 0
 			}
-			tick := time.Duration(tickCnt) * 100 * time.Millisecond
 
-			fmt.Println("Sleep", tick)
+			tick := time.Duration(tickCnt) * 100 * time.Millisecond
+			if verbose {
+				fmt.Println("Sleep", tick)
+			}
+
 			clock.Run(tick)
 		}
 	}

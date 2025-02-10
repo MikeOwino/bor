@@ -22,7 +22,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/maticnetwork/bor/common"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestHexOrDecimal256(t *testing.T) {
@@ -50,11 +50,13 @@ func TestHexOrDecimal256(t *testing.T) {
 	}
 	for _, test := range tests {
 		var num HexOrDecimal256
+
 		err := num.UnmarshalText([]byte(test.input))
 		if (err == nil) != test.ok {
 			t.Errorf("ParseBig(%q) -> (err == nil) == %t, want %t", test.input, err == nil, test.ok)
 			continue
 		}
+
 		if test.num != nil && (*big.Int)(&num).Cmp(test.num) != 0 {
 			t.Errorf("ParseBig(%q) -> %d, want %d", test.input, (*big.Int)(&num), test.num)
 		}
@@ -171,7 +173,6 @@ func BenchmarkByteAt(b *testing.B) {
 }
 
 func BenchmarkByteAtOld(b *testing.B) {
-
 	bigint := MustParseBig256("0x18F8F8F1000111000110011100222004330052300000000000000000FEFCF3CC")
 	for i := 0; i < b.N; i++ {
 		PaddedBigBytes(bigint, 32)
@@ -181,9 +182,9 @@ func BenchmarkByteAtOld(b *testing.B) {
 func TestReadBits(t *testing.T) {
 	check := func(input string) {
 		want, _ := hex.DecodeString(input)
-		int, _ := new(big.Int).SetString(input, 16)
+		n, _ := new(big.Int).SetString(input, 16)
 		buf := make([]byte, len(want))
-		ReadBits(int, buf)
+		ReadBits(n, buf)
 		if !bytes.Equal(buf, want) {
 			t.Errorf("have: %x\nwant: %x", buf, want)
 		}
@@ -240,11 +241,11 @@ func TestBigEndianByteAt(t *testing.T) {
 	}
 	for _, test := range tests {
 		v := new(big.Int).SetBytes(common.Hex2Bytes(test.x))
+
 		actual := bigEndianByteAt(v, test.y)
 		if actual != test.exp {
 			t.Fatalf("Expected  [%v] %v:th byte to be %v, was %v.", test.x, test.y, test.exp, actual)
 		}
-
 	}
 }
 func TestLittleEndianByteAt(t *testing.T) {
@@ -273,11 +274,11 @@ func TestLittleEndianByteAt(t *testing.T) {
 	}
 	for _, test := range tests {
 		v := new(big.Int).SetBytes(common.Hex2Bytes(test.x))
+
 		actual := Byte(v, 32, test.y)
 		if actual != test.exp {
 			t.Fatalf("Expected  [%v] %v:th byte to be %v, was %v.", test.x, test.y, test.exp, actual)
 		}
-
 	}
 }
 

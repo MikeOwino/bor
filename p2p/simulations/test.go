@@ -19,10 +19,10 @@ package simulations
 import (
 	"testing"
 
-	"github.com/maticnetwork/bor/p2p"
-	"github.com/maticnetwork/bor/p2p/enode"
-	"github.com/maticnetwork/bor/p2p/enr"
-	"github.com/maticnetwork/bor/rpc"
+	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/enr"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // NoopService is the service that does not do anything
@@ -66,7 +66,7 @@ func (t *NoopService) APIs() []rpc.API {
 	return []rpc.API{}
 }
 
-func (t *NoopService) Start(server *p2p.Server) error {
+func (t *NoopService) Start() error {
 	return nil
 }
 
@@ -76,6 +76,7 @@ func (t *NoopService) Stop() error {
 
 func VerifyRing(t *testing.T, net *Network, ids []enode.ID) {
 	t.Helper()
+
 	n := len(ids)
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
@@ -95,6 +96,7 @@ func VerifyRing(t *testing.T, net *Network, ids []enode.ID) {
 
 func VerifyChain(t *testing.T, net *Network, ids []enode.ID) {
 	t.Helper()
+
 	n := len(ids)
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
@@ -114,8 +116,11 @@ func VerifyChain(t *testing.T, net *Network, ids []enode.ID) {
 
 func VerifyFull(t *testing.T, net *Network, ids []enode.ID) {
 	t.Helper()
+
 	n := len(ids)
+
 	var connections int
+
 	for i, lid := range ids {
 		for _, rid := range ids[i+1:] {
 			if net.GetConn(lid, rid) != nil {
@@ -132,6 +137,7 @@ func VerifyFull(t *testing.T, net *Network, ids []enode.ID) {
 
 func VerifyStar(t *testing.T, net *Network, ids []enode.ID, centerIndex int) {
 	t.Helper()
+
 	n := len(ids)
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {

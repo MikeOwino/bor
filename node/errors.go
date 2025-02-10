@@ -36,18 +36,8 @@ func convertFileLockError(err error) error {
 	if errno, ok := err.(syscall.Errno); ok && datadirInUseErrnos[uint(errno)] {
 		return ErrDatadirUsed
 	}
+
 	return err
-}
-
-// DuplicateServiceError is returned during Node startup if a registered service
-// constructor returns a service of the same type that was already started.
-type DuplicateServiceError struct {
-	Kind reflect.Type
-}
-
-// Error generates a textual representation of the duplicate service error.
-func (e *DuplicateServiceError) Error() string {
-	return fmt.Sprintf("duplicate service: %v", e.Kind)
 }
 
 // StopError is returned if a Node fails to stop either any of its registered

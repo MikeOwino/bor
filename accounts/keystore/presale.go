@@ -25,9 +25,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/maticnetwork/bor/accounts"
-	"github.com/maticnetwork/bor/crypto"
-	"github.com/pborman/uuid"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -37,7 +37,12 @@ func importPreSaleKey(keyStore keyStore, keyJSON []byte, password string) (accou
 	if err != nil {
 		return accounts.Account{}, nil, err
 	}
-	key.Id = uuid.NewRandom()
+
+	key.Id, err = uuid.NewRandom()
+	if err != nil {
+		return accounts.Account{}, nil, err
+	}
+
 	a := accounts.Account{
 		Address: key.Address,
 		URL: accounts.URL{
@@ -46,6 +51,7 @@ func importPreSaleKey(keyStore keyStore, keyJSON []byte, password string) (accou
 		},
 	}
 	err = keyStore.StoreKey(a.URL.Path, key, password)
+
 	return a, key, err
 }
 
@@ -56,17 +62,21 @@ func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error
 		Email   string
 		BtcAddr string
 	}{}
+
 	err = json.Unmarshal(fileContent, &preSaleKeyStruct)
 	if err != nil {
 		return nil, err
 	}
+
 	encSeedBytes, err := hex.DecodeString(preSaleKeyStruct.EncSeed)
 	if err != nil {
 		return nil, errors.New("invalid hex in encSeed")
 	}
+
 	if len(encSeedBytes) < 16 {
 		return nil, errors.New("invalid encSeed, too short")
 	}
+
 	iv := encSeedBytes[:16]
 	cipherText := encSeedBytes[16:]
 	/*
@@ -78,23 +88,27 @@ func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error
 	*/
 	passBytes := []byte(password)
 	derivedKey := pbkdf2.Key(passBytes, passBytes, 2000, 16, sha256.New)
+
 	plainText, err := aesCBCDecrypt(derivedKey, cipherText, iv)
 	if err != nil {
 		return nil, err
 	}
+
 	ethPriv := crypto.Keccak256(plainText)
 	ecKey := crypto.ToECDSAUnsafe(ethPriv)
 
 	key = &Key{
-		Id:         nil,
+		Id:         uuid.UUID{},
 		Address:    crypto.PubkeyToAddress(ecKey.PublicKey),
 		PrivateKey: ecKey,
 	}
 	derivedAddr := hex.EncodeToString(key.Address.Bytes()) // needed because .Hex() gives leading "0x"
 	expectedAddr := preSaleKeyStruct.EthAddr
+
 	if derivedAddr != expectedAddr {
 		err = fmt.Errorf("decrypted addr '%s' not equal to expected addr '%s'", derivedAddr, expectedAddr)
 	}
+
 	return key, err
 }
 
@@ -104,9 +118,11 @@ func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	stream := cipher.NewCTR(aesBlock, iv)
 	outText := make([]byte, len(inText))
 	stream.XORKeyStream(outText, inText)
+
 	return outText, err
 }
 
@@ -115,13 +131,16 @@ func aesCBCDecrypt(key, cipherText, iv []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	decrypter := cipher.NewCBCDecrypter(aesBlock, iv)
 	paddedPlaintext := make([]byte, len(cipherText))
 	decrypter.CryptBlocks(paddedPlaintext, cipherText)
+
 	plaintext := pkcs7Unpad(paddedPlaintext)
 	if plaintext == nil {
 		return nil, ErrDecrypt
 	}
+
 	return plaintext, err
 }
 
@@ -143,5 +162,6 @@ func pkcs7Unpad(in []byte) []byte {
 			return nil
 		}
 	}
+
 	return in[:len(in)-int(padding)]
 }

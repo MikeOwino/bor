@@ -14,12 +14,15 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+//go:build integration
+// +build integration
+
 package tests
 
 import (
 	"testing"
 
-	"github.com/maticnetwork/bor/params"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 func TestTransaction(t *testing.T) {
@@ -47,8 +50,8 @@ func TestTransaction(t *testing.T) {
 	txt.skipLoad("^ttValue/TransactionWithHighValueOverflow.json")
 	txt.walk(t, transactionTestDir, func(t *testing.T, name string, test *TransactionTest) {
 		cfg := params.MainnetChainConfig
-		if err := txt.checkFailure(t, name, test.Run(cfg)); err != nil {
-			t.Error(err)
+		if err := txt.checkFailure(t, test.Run(cfg)); err != nil {
+			t.Errorf("in 'transaction_test.go', test '%s' failed with error: '%v'", name, err)
 		}
 	})
 }
